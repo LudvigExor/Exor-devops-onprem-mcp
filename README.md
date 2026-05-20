@@ -74,6 +74,56 @@ npm run start:prod
 
 Om du använder **Visual Studio 2022 + GitHub Copilot** behöver du normalt lägga en `.mcp.json` i det repo där du vill använda servern.
 
+Det betyder att du kan ha:
+
+- en gemensam klon av denna plugin, till exempel `C:\projekt\Exor-devops-onprem-mcp`
+- en separat `.mcp.json` i varje projekt/repo
+
+På så sätt kopplar samma plugin upp sig mot **rätt collection och rätt defaultprojekt beroende på vilket repo du jobbar i**.
+
+### Enkel mall för `.mcp.json`
+
+Lägg denna fil i repo-roten i det projekt där du vill använda pluginen:
+
+```json
+{
+  "inputs": [],
+  "servers": {
+    "ado-onprem": {
+      "type": "stdio",
+      "command": "cmd",
+      "args": [
+        "/c",
+        "npm",
+        "run",
+        "start",
+        "--silent",
+        "--prefix",
+        "C:\\projekt\\Exor-devops-onprem-mcp"
+      ],
+      "env": {
+        "ADO_BASE_URL": "http://server:8080/tfs/CollectionName",
+        "ADO_DEFAULT_PROJECT": "ProjectName",
+        "ADO_API_VERSION": "5.1",
+        "ADO_COMMENTS_API_VERSION": "5.1-preview.3",
+        "ADO_USE_DEFAULT_CREDENTIALS": "true"
+      }
+    }
+  }
+}
+```
+
+Byt ut:
+
+- `ADO_BASE_URL` till collection-URL för det aktuella projektets DevOps-miljö
+- `ADO_DEFAULT_PROJECT` till projektets namn
+- sökvägen efter `--prefix` om du har klonat pluginen på en annan plats
+
+Bra tumregel är att ge servern ett tydligt namn per repo, till exempel:
+
+- `taxibokning-ado-onprem`
+- `mitt-andra-projekt-ado-onprem`
+
 Ett exempel finns i:
 
 ```text
