@@ -1,0 +1,21 @@
+{
+  "name": "azure-devops-onprem-mcp",
+  "version": "0.1.0",
+  "private": false,
+  "description": "MCP server for Azure DevOps Server on-prem",
+  "type": "module",
+  "main": "dist/index.js",
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "start": "tsx src/index.ts",
+    "start:prod": "node dist/index.js"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.29.0"
+  },
+  "devDependencies": {
+    "@types/node": "^24.9.1",
+    "tsx": "^4.20.6",
+    "typescript": "^5.9.3"
+  }
+}
