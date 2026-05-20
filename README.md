@@ -4,13 +4,16 @@ Praktisk guide för att komma igång med MCP-servern mot **Azure DevOps Server o
 
 ## Vad detta är
 
-Detta är en fristående MCP-server för:
+Detta är en fristående MCP-server för att koppla upp AI-agenter till en Devops On-premise setup:
 
-- work items
-- kommentarer på work items
-- repositories
+Funktioner:
+- läsa work items
+- posta implementation plans som kommentarer på work items
+- Läsa repositories/sprintar
 - pull requests
 - builds
+
+- Exempel prompt: "Felsök bugg med ID 12345 och posta lösningsförslag i ärendet"
 
 Servern fungerar mot **Azure DevOps Server / TFS on-prem** och kan köras med:
 
@@ -49,7 +52,7 @@ Minimikravet är normalt:
 
 ## Installera
 
-Kör i repo-roten:
+Ladda ner detta repo. I rooten, kör:
 
 ```powershell
 npm install
@@ -83,7 +86,7 @@ På så sätt kopplar samma plugin upp sig mot **rätt collection och rätt defa
 
 ### Enkel mall för `.mcp.json`
 
-Lägg denna fil i repo-roten i det projekt där du vill använda pluginen:
+Lägg denna fil i **rooten i det projekt** där du vill använda pluginen:
 
 ```json
 {
