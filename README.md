@@ -52,13 +52,31 @@ Minimikravet är normalt:
 
 ## Installera
 
-Ladda ner detta repo. I rooten, kör:
+Ladda ner eller klona detta repo.
+
+Detta är normalt ett **engångssteg efter att du klonat repo:t**.
+
+Kör i repo-roten:
 
 ```powershell
 npm install
 ```
 
+Det installerar de lokala Node-beroendena som servern behöver för att kunna startas.
+
+Du behöver normalt bara köra detta igen om `package.json` eller `package-lock.json` har ändrats.
+
 ## Starta servern lokalt
+
+Detta steg behövs normalt **inte** i daglig användning.
+
+När du har lagt in servern i `.mcp.json` eller `mcp-config.json` startas den normalt **automatiskt av MCP-klienten** när den behövs.
+
+Manuell start är främst till för:
+
+- felsökning
+- lokal utveckling av pluginen
+- verifiering att servern går att starta
 
 För utveckling:
 
