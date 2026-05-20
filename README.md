@@ -76,7 +76,7 @@ Om du använder **Visual Studio 2022 + GitHub Copilot** behöver du normalt läg
 
 Det betyder att du kan ha:
 
-- en gemensam klon av denna plugin, till exempel `C:\projekt\Exor-devops-onprem-mcp`
+- en gemensam klon av denna plugin, till exempel `C:\dev\Exor-devops-onprem-mcp`
 - en separat `.mcp.json` i varje projekt/repo
 
 På så sätt kopplar samma plugin upp sig mot **rätt collection och rätt defaultprojekt beroende på vilket repo du jobbar i**.
@@ -99,7 +99,7 @@ Lägg denna fil i repo-roten i det projekt där du vill använda pluginen:
         "start",
         "--silent",
         "--prefix",
-        "C:\\projekt\\Exor-devops-onprem-mcp"
+        "C:\\path\\to\\Exor-devops-onprem-mcp"
       ],
       "env": {
         "ADO_BASE_URL": "http://server:8080/tfs/CollectionName",
@@ -130,11 +130,11 @@ Ett exempel finns i:
 examples\repo-root.mcp.json
 ```
 
-Justera sökvägen till den lokala klonen av detta repo och fyll i era miljövariabler.
+Justera sökvägen till din lokala klon och fyll i era miljövariabler.
 
 ## GitHub Copilot CLI
 
-För **Copilot CLI** behövs en lokal användarspecifik konfiguration i:
+För **Copilot CLI** behövs en lokal användarspecifik konfiguration i användarens `.copilot`-mapp, normalt:
 
 ```text
 C:\Users\<DITT_ANVÄNDARNAMN>\.copilot\mcp-config.json
@@ -146,7 +146,7 @@ Ett exempel finns i:
 examples\copilot-cli-mcp-config.json
 ```
 
-Byt ut sökvägen till den lokala klonen av detta repo och fyll i era miljövariabler.
+Byt ut sökvägen till din lokala klon och fyll i era miljövariabler.
 
 ## Kommentarer på work items
 
