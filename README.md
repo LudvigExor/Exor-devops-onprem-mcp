@@ -215,6 +215,58 @@ Tanken är att agenten ska kunna:
 
 I första versionen postas granskningen som en vanlig övergripande PR-kommentar, inte som inline-kommentarer på specifika rader.
 
+### Vad granskningen tittar efter
+
+Kodgranskningen är tänkt att fokusera på sådant som faktiskt kan orsaka problem, till exempel:
+
+- buggar och logiska fel
+- säkerhetsrisker
+- ohanterade exceptions
+- dålig felhantering
+- onödig eller misstänkt kod
+- luckor i validering eller null-hantering
+
+Målet är alltså inte främst stilkommentarer, utan att hitta verkliga risker i ändringen.
+
+### Hur man triggar en kodgranskning
+
+När MCP-servern är tillgänglig i din klient kan du be agenten att granska en PR med en vanlig prompt.
+
+Exempel:
+
+- `Granska PR 123 i repo Backend och posta en kodgranskning i PR:n`
+- `Läs diffen i PR 456, leta efter buggar och säkerhetsrisker och skriv en sammanfattning som kommentar`
+- `Gör en AI-kodgranskning av senaste öppna PR:n i repo Api`
+
+### Hur granskningen utförs i praktiken
+
+Agenten använder i typfallet dessa steg:
+
+1. hämtar PR-detaljer
+2. hämtar commits i PR:n
+3. hämtar diff för ändrade filer
+4. analyserar ändringarna
+5. postar en sammanfattande kommentar i PR:n
+
+De viktigaste MCP-verktygen för detta är:
+
+- `ado_get_pull_request`
+- `ado_list_pull_request_commits`
+- `ado_get_pull_request_diff`
+- `ado_add_pull_request_comment`
+
+### Exempel på resultat
+
+När granskningen är klar postas en kommentar i PR:n som börjar med:
+
+`AI-genererad kommentar:`
+
+och med titeln:
+
+`Kodgranskning av AI`
+
+Därefter kommer själva granskningen med fynd, risker och rekommendationer.
+
 ## Kan AI posta som en annan användare?
 
 Normalt inte via en enkel visningsinställning i config.
