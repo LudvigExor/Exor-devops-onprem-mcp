@@ -549,7 +549,7 @@ const tools: Tool[] = [
   },
   {
     name: "ado_get_work_item_code_links",
-    description: "Resolve associated completed pull requests and direct commits from a work item's linked development artifacts.",
+    description: "Resolve associated completed pull requests and direct commits from a work item's linked development artifacts, with duplicate merge chains collapsed for faster review.",
     inputSchema: {
       type: "object",
       properties: {
@@ -939,6 +939,62 @@ function parseGitArtifactUrl(url: string | undefined) {
   }
 
   return undefined;
+}
+
+function normalizeCommitId(commitId: string | undefined) {
+  const normalized = commitId?.trim().toLowerCase();
+  return normalized && normalized.length > 0 ? normalized : undefined;
+}
+
+function isGitCommitId(commitId: string | undefined) {
+  const normalized = normalizeCommitId(commitId);
+  return normalized ? /^[0-9a-f]{40}$/i.test(normalized) : false;
+}
+
+function collectPullRequestReviewCommitIds(pullRequest: PullRequestResponse, commits: PullRequestCommitResponse[]) {
+  const commitIds = new Set<string>();
+
+  for (const commitId of [
+    pullRequest.lastMergeSourceCommit?.commitId,
+    pullRequest.lastMergeCommit?.commitId,
+    ...commits.map((commit) => commit.commitId),
+  ]) {
+    if (!isGitCommitId(commitId)) {
+      continue;
+    }
+
+    commitIds.add(normalizeCommitId(commitId)!);
+  }
+
+  return [...commitIds].sort();
+}
+
+function getPullRequestDeduplicationKeys(pullRequest: PullRequestResponse, reviewCommitIds: string[]) {
+  const keys: string[] = [];
+  const sourceCommitId = normalizeCommitId(pullRequest.lastMergeSourceCommit?.commitId);
+  const mergeCommitId = normalizeCommitId(pullRequest.lastMergeCommit?.commitId);
+
+  if (isGitCommitId(sourceCommitId)) {
+    keys.push(`source:${sourceCommitId}`);
+  }
+
+  if (reviewCommitIds.length > 0) {
+    keys.push(`commits:${reviewCommitIds.join(",")}`);
+  }
+
+  if (isGitCommitId(mergeCommitId)) {
+    keys.push(`merge:${mergeCommitId}`);
+  }
+
+  return keys;
+}
+
+function getPullRequestSortTimestamp(pullRequest: PullRequestResponse) {
+  const timestamps = [pullRequest.closedDate, pullRequest.creationDate]
+    .map((value) => (value ? Date.parse(value) : Number.NaN))
+    .filter(Number.isFinite);
+
+  return timestamps.length > 0 ? Math.max(...timestamps) : 0;
 }
 
 async function buildReviewDiffFiles(
@@ -1746,6 +1802,12 @@ async function main() {
 
         const directCommitLinks = new Map<string, { repositoryId: string; projectId: string; commitId: string; relation: WorkItemRelationResponse }>();
         const pullRequestLinks = new Map<string, { repositoryId: string; projectId: string; pullRequestId: number; relation: WorkItemRelationResponse }>();
+        const invalidDirectCommitLinks: Array<{
+          relationName: string | undefined;
+          repositoryId: string;
+          commitId: string;
+          reason: string;
+        }> = [];
 
         for (const relation of relations) {
           const parsed = parseGitArtifactUrl(relation.url);
@@ -1754,10 +1816,21 @@ async function main() {
           }
 
           if (parsed.artifactType === "commit" && parsed.commitId) {
-            directCommitLinks.set(`${parsed.repositoryId}:${parsed.commitId}`, {
+            const normalizedCommitId = normalizeCommitId(parsed.commitId);
+            if (!isGitCommitId(normalizedCommitId)) {
+              invalidDirectCommitLinks.push({
+                relationName: relation.attributes?.name,
+                repositoryId: parsed.repositoryId,
+                commitId: parsed.commitId,
+                reason: "Ogiltigt commit-id i work item-relation.",
+              });
+              continue;
+            }
+
+            directCommitLinks.set(`${parsed.repositoryId}:${normalizedCommitId}`, {
               repositoryId: parsed.repositoryId,
               projectId: parsed.projectId,
-              commitId: parsed.commitId,
+              commitId: normalizedCommitId!,
               relation,
             });
           }
@@ -1788,12 +1861,16 @@ async function main() {
                 )
               : [];
             const commits = normalizeCollection(commitsResponse);
+            const reviewCommitIds = include ? collectPullRequestReviewCommitIds(pullRequest, commits) : [];
 
             return {
               include,
               status,
               relationName: link.relation.attributes?.name,
               repositoryId: link.repositoryId,
+              sortTimestamp: getPullRequestSortTimestamp(pullRequest),
+              reviewCommitIds,
+              deduplicationKeys: include ? getPullRequestDeduplicationKeys(pullRequest, reviewCommitIds) : [],
               pullRequest: mapPullRequest(pullRequest),
               commits: commits.map((commit) => ({
                 commitId: commit.commitId,
@@ -1807,8 +1884,76 @@ async function main() {
           }),
         );
 
+        const deduplicationRepresentatives = new Map<string, { pullRequestId: number | undefined; title: string | undefined }>();
+        const coveredCommitIds = new Map<string, number[]>();
+        const duplicatePullRequests: Array<{
+          relationName: string | undefined;
+          repositoryId: string;
+          pullRequestId: number | undefined;
+          title: string | undefined;
+          status: string;
+          duplicateOfPullRequestId: number | undefined;
+          duplicateOfTitle: string | undefined;
+          matchedBy: string[];
+        }> = [];
+
+        const completedPullRequestResults = pullRequestResults.filter((item) => item.include);
+        const optimizedPullRequestResults = completedPullRequestResults
+          .sort((left, right) => {
+            if (right.sortTimestamp !== left.sortTimestamp) {
+              return right.sortTimestamp - left.sortTimestamp;
+            }
+
+            return (right.pullRequest.id ?? 0) - (left.pullRequest.id ?? 0);
+          })
+          .filter((item) => {
+            const matchedBy = item.deduplicationKeys.filter((key) => deduplicationRepresentatives.has(key));
+            if (matchedBy.length === 0) {
+              for (const key of item.deduplicationKeys) {
+                deduplicationRepresentatives.set(key, {
+                  pullRequestId: item.pullRequest.id,
+                  title: item.pullRequest.title,
+                });
+              }
+
+              for (const commitId of item.reviewCommitIds) {
+                const existingPullRequestIds = coveredCommitIds.get(commitId) ?? [];
+                coveredCommitIds.set(
+                  commitId,
+                  item.pullRequest.id ? [...new Set([...existingPullRequestIds, item.pullRequest.id])] : existingPullRequestIds,
+                );
+              }
+
+              return true;
+            }
+
+            const representative = deduplicationRepresentatives.get(matchedBy[0]);
+            duplicatePullRequests.push({
+              relationName: item.relationName,
+              repositoryId: item.repositoryId,
+              pullRequestId: item.pullRequest.id,
+              title: item.pullRequest.title,
+              status: item.status,
+              duplicateOfPullRequestId: representative?.pullRequestId,
+              duplicateOfTitle: representative?.title,
+              matchedBy,
+            });
+            return false;
+          });
+
+        const directCommitLinksToReview = [...directCommitLinks.values()];
+        const skippedDirectCommits = directCommitLinksToReview
+          .filter((link) => coveredCommitIds.has(link.commitId))
+          .map((link) => ({
+            relationName: link.relation.attributes?.name,
+            repositoryId: link.repositoryId,
+            commitId: link.commitId,
+            coveredByPullRequestIds: coveredCommitIds.get(link.commitId) ?? [],
+            reason: "Commiten täcks redan av en vald pull request.",
+          }));
+
         const directCommitResults = await Promise.all(
-          [...directCommitLinks.values()].map(async (link) => {
+          directCommitLinksToReview.filter((link) => !coveredCommitIds.has(link.commitId)).map(async (link) => {
             const commit = await getCommit(config, resolvedProject, link.repositoryId, link.commitId);
             return {
               relationName: link.relation.attributes?.name,
@@ -1826,11 +1971,21 @@ async function main() {
 
         return toTextResult({
           workItem: mapWorkItem(workItem, true),
-          completedPullRequests: pullRequestResults.filter((item) => item.include).map((item) => ({
+          optimization: {
+            completedPullRequestsBeforeDeduplication: completedPullRequestResults.length,
+            completedPullRequestsAfterDeduplication: optimizedPullRequestResults.length,
+            duplicatePullRequestsSkipped: duplicatePullRequests.length,
+            directCommitsBeforeDeduplication: directCommitLinks.size,
+            directCommitsAfterDeduplication: directCommitResults.length,
+            directCommitsSkippedBecauseCoveredByPullRequest: skippedDirectCommits.length,
+            directCommitsSkippedBecauseInvalidRelation: invalidDirectCommitLinks.length,
+          },
+          completedPullRequests: optimizedPullRequestResults.map((item) => ({
             relationName: item.relationName,
             repositoryId: item.repositoryId,
             pullRequest: item.pullRequest,
             commits: item.commits,
+            reviewCommitIds: item.reviewCommitIds,
           })),
           skippedPullRequests: pullRequestResults.filter((item) => !item.include).map((item) => ({
             relationName: item.relationName,
@@ -1839,7 +1994,9 @@ async function main() {
             title: item.pullRequest.title,
             status: item.status,
           })),
+          duplicatePullRequests,
           directCommits: directCommitResults,
+          skippedDirectCommits: [...skippedDirectCommits, ...invalidDirectCommitLinks],
         });
       }
 

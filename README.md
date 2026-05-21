@@ -156,7 +156,7 @@ Granskningen fokuserar på:
 
 Om commits och pull requests är länkade till ett work item kan agenten utgå från work itemet, granska associerad kod och posta resultatet i work itemet.
 
-Abandoned pull requests ignoreras. Completed pull requests och direkta commit-länkar används som underlag.
+Abandoned pull requests ignoreras. Repetitiva mergekedjor mellan flera completed PR:er dedupliceras så att samma kod inte granskas flera gånger. Direkta commit-länkar som redan täcks av en vald PR hoppas också över.
 
 Exempel:
 

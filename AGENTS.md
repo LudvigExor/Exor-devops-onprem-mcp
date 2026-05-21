@@ -108,8 +108,9 @@ Om användaren ber om kodgranskning utifrån ett work item ska agenten i första
 1. läsa work itemets relationer
 2. hitta associerade PR:er och commits
 3. ignorera PR:er med status `abandoned`
-4. fokusera på `completed` PR:er och direkta commit-länkar
-5. posta sammanfattningen som kommentar i work itemet
+4. deduplicera repetitiva mergekedjor och behålla den senaste representativa `completed` PR:n per unik kodmängd
+5. hoppa över direkta commit-länkar som redan täcks av de valda PR:erna
+6. posta sammanfattningen som kommentar i work itemet
 
 Om både PR-länkar och commit-länkar finns får agenten använda båda som granskningsunderlag.
 
