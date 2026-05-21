@@ -143,6 +143,8 @@ Rekommenderad start är:
 
 När `automaticCodeReviewPR=true` installerar pluginet en hanterad git-hook i repot automatiskt. Git saknar en riktig `post-push`-hook, så pluginet använder en hanterad `pre-push`-hook som startar reviewflödet i bakgrunden för aktuell branch.
 
+Efter push väntar flödet dessutom en kort stund och letar efter en ny aktiv PR för samma branch. Det gör att review ofta kan triggas även om du skapar PR:n några minuter efter sista pushen.
+
 Kommandot i `automaticCodeReviewPRCommand` får två env-variabler:
 
 - `ADO_AUTO_REVIEW_PROMPT_FILE`

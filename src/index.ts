@@ -2012,6 +2012,37 @@ async function waitForPullRequestSourceCommit(
   return latest;
 }
 
+async function waitForActivePullRequestOnBranch(
+  config: ServerConfig,
+  project: string,
+  repository: string,
+  sourceRefName: string,
+  attempts = 36,
+  delayMs = 5000,
+) {
+  for (let index = 0; index <= attempts; index += 1) {
+    const pullRequests = await listPullRequests(config, project, repository, {
+      status: "active",
+      sourceRefName,
+      top: 10,
+    });
+
+    const selectedPullRequest = pullRequests
+      .filter((pullRequest) => !pullRequest.isDraft)
+      .sort((left, right) => (right.pullRequestId ?? 0) - (left.pullRequestId ?? 0))[0];
+
+    if (selectedPullRequest?.pullRequestId) {
+      return selectedPullRequest;
+    }
+
+    if (index < attempts) {
+      await new Promise((resolve) => setTimeout(resolve, delayMs));
+    }
+  }
+
+  return undefined;
+}
+
 function parseCliArgs(argv: string[]) {
   const result = new Map<string, string>();
   for (let index = 0; index < argv.length; index += 2) {
@@ -2052,15 +2083,12 @@ async function runAutoReviewTrigger(argv: string[]) {
   const project = ensureProject(undefined, config);
   const repository = await resolveRepositoryForWorkspace(config, project, repoRoot);
   const sourceRefName = `refs/heads/${branch}`;
-  const pullRequests = await listPullRequests(config, project, repository.id ?? repository.name ?? "", {
-    status: "active",
+  const selectedPullRequest = await waitForActivePullRequestOnBranch(
+    config,
+    project,
+    repository.id ?? repository.name ?? "",
     sourceRefName,
-    top: 10,
-  });
-
-  const selectedPullRequest = pullRequests
-    .filter((pullRequest) => !pullRequest.isDraft)
-    .sort((left, right) => (right.pullRequestId ?? 0) - (left.pullRequestId ?? 0))[0];
+  );
 
   if (!selectedPullRequest?.pullRequestId) {
     return;
