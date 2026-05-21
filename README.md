@@ -130,10 +130,16 @@ examples\copilot-cli-mcp-config.json
 
 Personliga inställningar för automatisk PR-kodgranskning ska ligga i **din egen lokala MCP-config**, inte i projektets repo.
 
+Funktionen är **(experimental)** och bör vara avstängd som standard tills du själv vill testa den.
+
 Använd:
 
 - `pluginSettings.azure-devops-onprem.automaticCodeReviewPR: true|false` för att slå på eller av funktionen
 - `pluginSettings.azure-devops-onprem.automaticCodeReviewPRCommand` för vilket lokalt kommando som ska producera själva review-texten
+
+Rekommenderad start är:
+
+- `automaticCodeReviewPR: false`
 
 När `automaticCodeReviewPR=true` installerar pluginet en hanterad git-hook i repot automatiskt. Git saknar en riktig `post-push`-hook, så pluginet använder en hanterad `pre-push`-hook som startar reviewflödet i bakgrunden för aktuell branch.
 
