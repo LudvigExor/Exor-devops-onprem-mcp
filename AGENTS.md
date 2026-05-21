@@ -18,6 +18,7 @@ Pluginen får bara skriva:
 - nya kommentarer på work items
 - uppdateringar av work item-kommentarer
 - nya kommentarer på pull requests
+- uppdateringar av tidigare AI-genererade pull request-kommentarer
 
 För pull requests gäller uttryckligen att pluginen bara får **posta kommentarer**.
 

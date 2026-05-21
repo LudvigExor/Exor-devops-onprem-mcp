@@ -22,5 +22,11 @@
         "*"
       ]
     }
+  },
+  "pluginSettings": {
+    "azure-devops-onprem": {
+      "automaticCodeReviewPR": true,
+      "automaticCodeReviewPRCommand": "powershell -NoProfile -File C:\\path\\to\\run-auto-review.ps1"
+    }
   }
 }

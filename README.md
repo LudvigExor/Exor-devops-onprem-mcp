@@ -128,6 +128,22 @@ Exempel finns i detta repo under:
 examples\copilot-cli-mcp-config.json
 ```
 
+Personliga inställningar för automatisk PR-kodgranskning ska ligga i **din egen lokala MCP-config**, inte i projektets repo.
+
+Använd:
+
+- `pluginSettings.azure-devops-onprem.automaticCodeReviewPR: true|false` för att slå på eller av funktionen
+- `pluginSettings.azure-devops-onprem.automaticCodeReviewPRCommand` för vilket lokalt kommando som ska producera själva review-texten
+
+När `automaticCodeReviewPR=true` installerar pluginet en hanterad git-hook i repot automatiskt. Git saknar en riktig `post-push`-hook, så pluginet använder en hanterad `pre-push`-hook som startar reviewflödet i bakgrunden för aktuell branch.
+
+Kommandot i `automaticCodeReviewPRCommand` får två env-variabler:
+
+- `ADO_AUTO_REVIEW_PROMPT_FILE`
+- `ADO_AUTO_REVIEW_OUTPUT_FILE`
+
+Kommandot ska läsa prompten från `ADO_AUTO_REVIEW_PROMPT_FILE` och skriva själva review-texten till `ADO_AUTO_REVIEW_OUTPUT_FILE`.
+
 ## Kommentarformat
 
 Alla kommentarer som skapas via pluginen börjar med. Kommentarer kan skapas i work items eller i PR:
@@ -151,6 +167,8 @@ Granskningen fokuserar på:
 - ohanterade exceptions
 - brister i felhantering
 - onödig eller misstänkt kod
+
+Pluginet kan också uppdatera en tidigare AI-kommentar i PR:n i stället för att alltid skapa en ny.
 
 ## Kodgranskning från work item
 

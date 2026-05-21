@@ -8,7 +8,12 @@ import {
 } from "@modelcontextprotocol/sdk/types.js";
 import { createTwoFilesPatch } from "diff";
 import { execFile } from "node:child_process";
+import { existsSync } from "node:fs";
+import { chmod, mkdir, readFile, rm, stat, writeFile } from "node:fs/promises";
+import os from "node:os";
+import path from "node:path";
 import { promisify } from "node:util";
+import { fileURLToPath } from "node:url";
 
 type ServerConfig = {
   baseUrl: string;
@@ -18,6 +23,34 @@ type ServerConfig = {
   authHeader?: string;
   authMode: "header" | "pat" | "basic" | "windows" | "anonymous";
   useDefaultCredentials: boolean;
+};
+
+type LocalConfigServerEntry = {
+  command?: string;
+  args?: string[];
+  env?: Record<string, string>;
+  automaticCodeReviewPR?: boolean;
+  automaticCodeReviewPRCommand?: string;
+};
+
+type LocalPluginSettingsEntry = {
+  automaticCodeReviewPR?: boolean;
+  automaticCodeReviewPRCommand?: string;
+};
+
+type LocalConfigFile = {
+  servers?: Record<string, LocalConfigServerEntry>;
+  mcpServers?: Record<string, LocalConfigServerEntry>;
+  pluginSettings?: Record<string, LocalPluginSettingsEntry>;
+  plugins?: Record<string, LocalPluginSettingsEntry>;
+};
+
+type LocalAutomationSettings = {
+  automaticCodeReviewPR: boolean;
+  automaticCodeReviewPRCommand?: string;
+  serverName?: string;
+  configFilePath?: string;
+  env: Record<string, string>;
 };
 
 type QueryValue = string | number | boolean | undefined;
@@ -51,6 +84,7 @@ type PullRequestResponse = {
   title: string;
   description?: string;
   status?: string;
+  isDraft?: boolean;
   mergeStatus?: string;
   creationDate?: string;
   closedDate?: string;
@@ -155,6 +189,8 @@ type BuildResponse = {
 
 const DEFAULT_API_VERSION = "5.1";
 const DEFAULT_PR_REVIEW_TITLE = "Kodgranskning av AI";
+const AI_COMMENT_PREFIX = "AI-genererad kommentar:";
+const MANAGED_HOOK_MARKER = "# exor-ado-auto-review managed hook";
 const SERVER_NAME = "azure-devops-onprem";
 
 type CommentAuthorResponse = {
@@ -302,6 +338,10 @@ const tools: Tool[] = [
         status: {
           type: "string",
           enum: ["active", "completed", "abandoned", "all"],
+        },
+        sourceRefName: {
+          type: "string",
+          description: "Optional source ref filter, for example refs/heads/my-branch.",
         },
         top: {
           type: "number",
@@ -456,6 +496,45 @@ const tools: Tool[] = [
         },
       },
       required: ["repository", "pullRequestId", "text"],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: "ado_update_pull_request_comment",
+    description: "Update an existing AI-formatted pull request comment.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        project: {
+          type: "string",
+          description: "Optional project name. Falls back to ADO_DEFAULT_PROJECT.",
+        },
+        repository: {
+          type: "string",
+          description: "Repository name or id.",
+        },
+        pullRequestId: {
+          type: "number",
+          minimum: 1,
+        },
+        threadId: {
+          type: "number",
+          minimum: 1,
+        },
+        commentId: {
+          type: "number",
+          minimum: 1,
+        },
+        title: {
+          type: "string",
+          description: "Optional comment title. Defaults to 'Kodgranskning av AI'.",
+        },
+        text: {
+          type: "string",
+          description: "Updated comment body text.",
+        },
+      },
+      required: ["repository", "pullRequestId", "threadId", "commentId", "text"],
       additionalProperties: false,
     },
   },
@@ -768,7 +847,7 @@ function formatAiGeneratedComment(title: string, text: string): string {
     throw new Error("text är obligatorisk.");
   }
 
-  return `<p><i>AI-genererad kommentar:</i></p><p>&nbsp;</p><p><strong>${escapeHtml(trimmedTitle)}</strong></p>${formatTextBodyAsHtml(trimmedText)}`;
+  return `<p><i>${escapeHtml(AI_COMMENT_PREFIX)}</i></p><p>&nbsp;</p><p><strong>${escapeHtml(trimmedTitle)}</strong></p>${formatTextBodyAsHtml(trimmedText)}`;
 }
 
 function mapComment(comment: CommentResponse) {
@@ -791,6 +870,7 @@ function mapPullRequest(pullRequest: PullRequestResponse) {
     title: pullRequest.title,
     description: pullRequest.description,
     status: pullRequest.status,
+    isDraft: pullRequest.isDraft ?? false,
     mergeStatus: pullRequest.mergeStatus,
     creationDate: pullRequest.creationDate,
     closedDate: pullRequest.closedDate,
@@ -1115,25 +1195,29 @@ function resolveAuth(config: NodeJS.ProcessEnv): Pick<ServerConfig, "authHeader"
   };
 }
 
-function readConfig(): ServerConfig {
-  const auth = resolveAuth(process.env);
-  const baseUrl = process.env.ADO_BASE_URL?.trim();
+function readConfigFromValues(values: Record<string, string | undefined>): ServerConfig {
+  const auth = resolveAuth(values);
+  const baseUrl = values.ADO_BASE_URL?.trim();
 
   if (!baseUrl) {
     throw new Error("ADO_BASE_URL saknas. Ange collection-URL till Azure DevOps Server.");
   }
 
-  const apiVersion = process.env.ADO_API_VERSION?.trim() || DEFAULT_API_VERSION;
+  const apiVersion = values.ADO_API_VERSION?.trim() || DEFAULT_API_VERSION;
 
   return {
     baseUrl: normalizeBaseUrl(baseUrl),
     apiVersion,
-    commentsApiVersion: process.env.ADO_COMMENTS_API_VERSION?.trim() || `${apiVersion}-preview.3`,
-    defaultProject: process.env.ADO_DEFAULT_PROJECT?.trim() || undefined,
+    commentsApiVersion: values.ADO_COMMENTS_API_VERSION?.trim() || `${apiVersion}-preview.3`,
+    defaultProject: values.ADO_DEFAULT_PROJECT?.trim() || undefined,
     authHeader: auth.authHeader,
     authMode: auth.authMode,
     useDefaultCredentials: auth.authMode === "windows",
   };
+}
+
+function readConfig(): ServerConfig {
+  return readConfigFromValues(process.env);
 }
 
 function ensureProject(project: string | undefined, config: ServerConfig): string {
@@ -1364,7 +1448,717 @@ async function getCommitChanges(
   );
 }
 
+async function listPullRequests(
+  config: ServerConfig,
+  project: string,
+  repository: string,
+  options: {
+    status?: string;
+    top?: number;
+    sourceRefName?: string;
+  } = {},
+) {
+  const response = await adoRequest<CollectionListResponse<PullRequestResponse>>(
+    config,
+    `/${encodePathSegment(project)}/_apis/git/repositories/${encodePathSegment(repository)}/pullrequests`,
+    undefined,
+    {
+      "searchCriteria.status": options.status ?? "active",
+      "searchCriteria.sourceRefName": options.sourceRefName,
+      "$top": options.top ?? 25,
+    },
+  );
+
+  return response.value ?? [];
+}
+
+async function listPullRequestThreads(config: ServerConfig, project: string, repository: string, pullRequestId: number) {
+  const response = await adoRequest<CollectionListResponse<PullRequestThreadResponse> | PullRequestThreadResponse[]>(
+    config,
+    `/${encodePathSegment(project)}/_apis/git/repositories/${encodePathSegment(repository)}/pullRequests/${pullRequestId}/threads`,
+  );
+  return normalizeCollection(response);
+}
+
+async function addPullRequestComment(
+  config: ServerConfig,
+  project: string,
+  repository: string,
+  pullRequestId: number,
+  title: string,
+  text: string,
+) {
+  return adoRequest<PullRequestThreadResponse>(
+    config,
+    `/${encodePathSegment(project)}/_apis/git/repositories/${encodePathSegment(repository)}/pullRequests/${pullRequestId}/threads`,
+    {
+      method: "POST",
+      body: JSON.stringify({
+        comments: [
+          {
+            parentCommentId: 0,
+            content: formatAiGeneratedComment(title, text),
+            commentType: 1,
+          },
+        ],
+        status: 1,
+      }),
+    },
+  );
+}
+
+async function updatePullRequestComment(
+  config: ServerConfig,
+  project: string,
+  repository: string,
+  pullRequestId: number,
+  threadId: number,
+  commentId: number,
+  title: string,
+  text: string,
+) {
+  return adoRequest<PullRequestCommentResponse>(
+    config,
+    `/${encodePathSegment(project)}/_apis/git/repositories/${encodePathSegment(repository)}/pullRequests/${pullRequestId}/threads/${threadId}/comments/${commentId}`,
+    {
+      method: "PATCH",
+      body: JSON.stringify({
+        content: formatAiGeneratedComment(title, text),
+      }),
+    },
+  );
+}
+
+async function getPullRequestDiffResult(
+  config: ServerConfig,
+  project: string,
+  repository: string,
+  pullRequestId: number,
+  options: {
+    top?: number;
+    maxFiles?: number;
+    maxPatchLines?: number;
+  } = {},
+) {
+  const maxFiles = Math.min(options.maxFiles ?? 20, 100);
+  const maxPatchLines = Math.min(options.maxPatchLines ?? 400, 2000);
+  const pullRequest = await getPullRequest(config, project, repository, pullRequestId);
+  const sourceCommitId = pullRequest.lastMergeSourceCommit?.commitId;
+  const targetCommitId = pullRequest.lastMergeTargetCommit?.commitId;
+
+  if (!sourceCommitId || !targetCommitId) {
+    throw new Error("Pull request saknar commit-information för diff. lastMergeSourceCommit och lastMergeTargetCommit krävs.");
+  }
+
+  const diffResponse = await adoRequest<GitCommitDiffsResponse>(
+    config,
+    `/${encodePathSegment(project)}/_apis/git/repositories/${encodePathSegment(repository)}/diffs/commits`,
+    undefined,
+    {
+      "$top": options.top ?? 200,
+      diffCommonCommit: "false",
+      baseVersion: targetCommitId,
+      baseVersionType: "commit",
+      targetVersion: sourceCommitId,
+      targetVersionType: "commit",
+    },
+  );
+
+  const files = await buildReviewDiffFiles(
+    config,
+    project,
+    repository,
+    diffResponse.changes ?? [],
+    targetCommitId,
+    sourceCommitId,
+    maxFiles,
+    maxPatchLines,
+  );
+
+  return {
+    pullRequest,
+    sourceCommitId,
+    targetCommitId,
+    diffSummary: {
+      allChangesIncluded: diffResponse.allChangesIncluded ?? false,
+      changeCounts: diffResponse.changeCounts ?? {},
+      commonCommit: diffResponse.commonCommit,
+      aheadCount: diffResponse.aheadCount,
+      behindCount: diffResponse.behindCount,
+    },
+    includedFileCount: files.length,
+    files,
+  };
+}
+
+function resolvePluginRoot() {
+  const currentFile = fileURLToPath(import.meta.url);
+  const currentDir = path.dirname(currentFile);
+  const baseDirName = path.basename(currentDir).toLowerCase();
+  return baseDirName === "src" || baseDirName === "dist" ? path.dirname(currentDir) : currentDir;
+}
+
+function normalizePathForComparison(value: string) {
+  return path.resolve(value).replace(/\//g, "\\").toLowerCase();
+}
+
+function getUserConfigCandidates() {
+  const homeDir = os.homedir();
+  return [
+    path.join(homeDir, ".copilot", "mcp-config.json"),
+    path.join(homeDir, ".codex", "mcp-config.json"),
+    path.join(homeDir, ".claude", "mcp-config.json"),
+  ];
+}
+
+function getServerEntries(config: LocalConfigFile): Array<{ serverName: string; entry: LocalConfigServerEntry }> {
+  const entries = Object.entries(config.mcpServers ?? config.servers ?? {});
+  return entries.map(([serverName, entry]) => ({ serverName, entry }));
+}
+
+function serverEntryMatchesPlugin(entry: LocalConfigServerEntry, pluginRoot: string) {
+  const normalizedPluginRoot = normalizePathForComparison(pluginRoot);
+  const values = [entry.command, ...(entry.args ?? [])].filter((value): value is string => typeof value === "string");
+  return values.some((value) => {
+    const normalizedValue = value.replace(/^["']|["']$/g, "");
+    if (!path.isAbsolute(normalizedValue)) {
+      return normalizedValue.toLowerCase().includes("azure-devops-onprem-mcp");
+    }
+
+    return normalizePathForComparison(normalizedValue).includes(normalizedPluginRoot);
+  });
+}
+
+async function readJsonFile<T>(filePath: string) {
+  const content = await readFile(filePath, "utf8");
+  return JSON.parse(content) as T;
+}
+
+function getPluginSettingsEntry(config: LocalConfigFile) {
+  return config.pluginSettings?.[SERVER_NAME] ?? config.plugins?.[SERVER_NAME];
+}
+
+function normalizeStringRecord(values: Record<string, string | undefined>) {
+  return Object.fromEntries(
+    Object.entries(values).filter(([, value]) => typeof value === "string"),
+  ) as Record<string, string>;
+}
+
+async function readRepoServerEnv(pluginRoot: string, repoRoot: string) {
+  const candidatePaths = [path.join(repoRoot, ".mcp.json"), path.join(repoRoot, "mcp-config.json")];
+
+  for (const filePath of candidatePaths) {
+    if (!existsSync(filePath)) {
+      continue;
+    }
+
+    try {
+      const config = await readJsonFile<LocalConfigFile>(filePath);
+      const matchingEntry = getServerEntries(config).find(({ entry }) => serverEntryMatchesPlugin(entry, pluginRoot));
+      if (matchingEntry?.entry.env) {
+        return matchingEntry.entry.env;
+      }
+    } catch (error) {
+      console.error(`Kunde inte läsa repo-konfig ${filePath}: ${truncate(String(error))}`);
+    }
+  }
+
+  return undefined;
+}
+
+async function readLocalAutomationSettings(pluginRoot: string, repoRoot?: string): Promise<LocalAutomationSettings | undefined> {
+  for (const filePath of getUserConfigCandidates()) {
+    if (!existsSync(filePath)) {
+      continue;
+    }
+
+    try {
+      const config = await readJsonFile<LocalConfigFile>(filePath);
+      const matchingEntry = getServerEntries(config).find(({ entry }) => serverEntryMatchesPlugin(entry, pluginRoot));
+      const pluginSettings = getPluginSettingsEntry(config);
+      const automaticCodeReviewPR =
+        matchingEntry?.entry.automaticCodeReviewPR === true || pluginSettings?.automaticCodeReviewPR === true;
+      const automaticCodeReviewPRCommand =
+        asString(matchingEntry?.entry.automaticCodeReviewPRCommand) ?? asString(pluginSettings?.automaticCodeReviewPRCommand);
+
+      if (!matchingEntry && !pluginSettings) {
+        continue;
+      }
+
+      const entryEnv = matchingEntry?.entry.env ? normalizeStringRecord(matchingEntry.entry.env) : undefined;
+      const processEnv = normalizeStringRecord(
+        Object.fromEntries(Object.entries(process.env).filter(([key]) => key.startsWith("ADO_"))),
+      );
+      const env = entryEnv ?? (repoRoot ? await readRepoServerEnv(pluginRoot, repoRoot) : undefined) ?? processEnv;
+
+      if (!env.ADO_BASE_URL) {
+        continue;
+      }
+
+      if (!matchingEntry) {
+        return {
+          automaticCodeReviewPR,
+          automaticCodeReviewPRCommand,
+          serverName: SERVER_NAME,
+          configFilePath: filePath,
+          env,
+        };
+      }
+
+      return {
+        automaticCodeReviewPR,
+        automaticCodeReviewPRCommand,
+        serverName: matchingEntry.serverName,
+        configFilePath: filePath,
+        env,
+      };
+    } catch (error) {
+      console.error(`Kunde inte läsa lokal MCP-konfig ${filePath}: ${truncate(String(error))}`);
+    }
+  }
+
+  return undefined;
+}
+
+async function runGitCommand(args: string[], cwd: string) {
+  const { stdout } = await execFileAsync("git", args, {
+    cwd,
+    env: process.env,
+    maxBuffer: 1024 * 1024,
+  });
+  return stdout.trim();
+}
+
+async function resolveGitRepoRoot(startDir: string) {
+  try {
+    const resolved = await runGitCommand(["rev-parse", "--show-toplevel"], startDir);
+    return resolved || undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+async function resolveWorkspaceRepoRoot() {
+  const candidates = [
+    process.env.ADO_WORKSPACE_REPO_ROOT,
+    process.env.INIT_CWD,
+    process.cwd(),
+  ].filter((value): value is string => typeof value === "string" && value.trim().length > 0);
+
+  for (const candidate of candidates) {
+    const repoRoot = await resolveGitRepoRoot(candidate);
+    if (repoRoot) {
+      return repoRoot;
+    }
+  }
+
+  return undefined;
+}
+
+function getManagedHookPath(repoRoot: string) {
+  return path.join(repoRoot, ".git", "hooks", "pre-push");
+}
+
+function buildManagedHookScript(pluginRoot: string) {
+  const nodePath = process.execPath.replace(/\\/g, "/");
+  const tsxPath = path.join(pluginRoot, "node_modules", "tsx", "dist", "cli.mjs").replace(/\\/g, "/");
+  const entryPath = path.join(pluginRoot, "src", "index.ts").replace(/\\/g, "/");
+
+  return `#!/bin/sh
+${MANAGED_HOOK_MARKER}
+REMOTE_NAME="$1"
+REMOTE_URL="$2"
+REPO_ROOT=$(git rev-parse --show-toplevel 2>/dev/null)
+CURRENT_BRANCH=$(git rev-parse --abbrev-ref HEAD 2>/dev/null)
+CURRENT_COMMIT=$(git rev-parse HEAD 2>/dev/null)
+if [ -z "$REPO_ROOT" ] || [ -z "$CURRENT_BRANCH" ] || [ "$CURRENT_BRANCH" = "HEAD" ] || [ -z "$CURRENT_COMMIT" ]; then
+  exit 0
+fi
+"${nodePath}" "${tsxPath}" "${entryPath}" auto-review-trigger --repo-root "$REPO_ROOT" --branch "$CURRENT_BRANCH" --commit "$CURRENT_COMMIT" --remote-name "$REMOTE_NAME" --remote-url "$REMOTE_URL" >/dev/null 2>&1 &
+exit 0
+`;
+}
+
+async function syncManagedHook(repoRoot: string, pluginRoot: string, enabled: boolean) {
+  const hookPath = getManagedHookPath(repoRoot);
+  const hookDir = path.dirname(hookPath);
+  await mkdir(hookDir, { recursive: true });
+
+  if (!enabled) {
+    if (!existsSync(hookPath)) {
+      return;
+    }
+
+    const currentContent = await readFile(hookPath, "utf8");
+    if (currentContent.includes(MANAGED_HOOK_MARKER)) {
+      await rm(hookPath, { force: true });
+    }
+    return;
+  }
+
+  const nextContent = buildManagedHookScript(pluginRoot);
+  const currentContent = existsSync(hookPath) ? await readFile(hookPath, "utf8") : undefined;
+  if (currentContent === nextContent) {
+    return;
+  }
+
+  if (currentContent && !currentContent.includes(MANAGED_HOOK_MARKER)) {
+    throw new Error(`Git-hook finns redan i ${hookPath}. Pluginet skriver inte över en befintlig användarhook.`);
+  }
+
+  await writeFile(hookPath, nextContent, "utf8");
+  await chmod(hookPath, 0o755).catch(() => undefined);
+}
+
+async function maybeSyncAutoReviewHook() {
+  const pluginRoot = resolvePluginRoot();
+  const repoRoot = await resolveWorkspaceRepoRoot();
+  if (!repoRoot) {
+    return;
+  }
+
+  const settings = await readLocalAutomationSettings(pluginRoot, repoRoot);
+  if (!settings) {
+    return;
+  }
+
+  await syncManagedHook(repoRoot, pluginRoot, settings.automaticCodeReviewPR);
+}
+
+function normalizeRemoteIdentity(value: string | undefined) {
+  if (!value) {
+    return undefined;
+  }
+
+  return value
+    .trim()
+    .replace(/\\/g, "/")
+    .replace(/\.git$/i, "")
+    .replace(/^[^@]+@/, "")
+    .replace(/^ssh:\/\//i, "")
+    .replace(/^https?:\/\//i, "")
+    .replace(/\/+$/, "")
+    .toLowerCase();
+}
+
+async function resolveRepositoryForWorkspace(config: ServerConfig, project: string, repoRoot: string) {
+  const remoteUrl = await runGitCommand(["remote", "get-url", "origin"], repoRoot).catch(() => "");
+  const normalizedRemoteUrl = normalizeRemoteIdentity(remoteUrl);
+  const repositoriesResponse = await adoRequest<CollectionListResponse<RepositoryResponse>>(
+    config,
+    `/${encodePathSegment(project)}/_apis/git/repositories`,
+  );
+  const repositories = repositoriesResponse.value ?? [];
+
+  if (normalizedRemoteUrl) {
+    const exactMatch = repositories.find((repository) => normalizeRemoteIdentity(repository.remoteUrl) === normalizedRemoteUrl);
+    if (exactMatch) {
+      return exactMatch;
+    }
+  }
+
+  const repoNameFromFolder = path.basename(repoRoot).toLowerCase();
+  const nameMatch = repositories.find((repository) => repository.name?.trim().toLowerCase() === repoNameFromFolder);
+  if (nameMatch) {
+    return nameMatch;
+  }
+
+  throw new Error("Kunde inte matcha lokalt git-repo mot repository i Azure DevOps.");
+}
+
+type PullRequestReviewState = {
+  lastReviewedSourceCommitId?: string;
+  threadId?: number;
+  commentId?: number;
+  updatedAt?: string;
+};
+
+type AutoReviewStateFile = {
+  pullRequests?: Record<string, PullRequestReviewState>;
+};
+
+function getAutoReviewStatePath(repoRoot: string) {
+  return path.join(repoRoot, ".git", "ado-auto-review-state.json");
+}
+
+async function readAutoReviewState(repoRoot: string): Promise<AutoReviewStateFile> {
+  const statePath = getAutoReviewStatePath(repoRoot);
+  if (!existsSync(statePath)) {
+    return {};
+  }
+
+  try {
+    return await readJsonFile<AutoReviewStateFile>(statePath);
+  } catch {
+    return {};
+  }
+}
+
+async function writeAutoReviewState(repoRoot: string, state: AutoReviewStateFile) {
+  await writeFile(getAutoReviewStatePath(repoRoot), JSON.stringify(state, null, 2), "utf8");
+}
+
+function buildPullRequestReviewPrompt(params: {
+  project: string;
+  repository: string;
+  pullRequest: ReturnType<typeof mapPullRequest>;
+  diff: Awaited<ReturnType<typeof getPullRequestDiffResult>>;
+}) {
+  const fileSections = params.diff.files
+    .map((file) => {
+      const patch = typeof file.patch === "string" ? file.patch : `[${file.skippedReason ?? "ingen patch"}]`;
+      return `Fil: ${file.path ?? file.originalPath ?? "(okänd)"}\nÄndring: ${file.changeType}\nPatch:\n${patch}`;
+    })
+    .join("\n\n---\n\n");
+
+  return [
+    "Gör en kortfattad men konkret kodgranskning på svenska av denna pull request.",
+    "Fokusera på buggar, logiska fel, säkerhetsrisker, ohanterade exceptions, brister i validering och onödig eller misstänkt kod.",
+    "Undvik stilkommentarer om de inte påverkar korrekthet tydligt.",
+    "Skriv bara själva granskningsinnehållet utan prefixet 'AI-genererad kommentar:' och utan titeln.",
+    "",
+    `Projekt: ${params.project}`,
+    `Repository: ${params.repository}`,
+    `Pull request: #${params.pullRequest.id} ${params.pullRequest.title}`,
+    `Source ref: ${params.pullRequest.sourceRefName ?? ""}`,
+    `Target ref: ${params.pullRequest.targetRefName ?? ""}`,
+    `Source commit: ${params.diff.sourceCommitId}`,
+    `Target commit: ${params.diff.targetCommitId}`,
+    "",
+    "Diffsammanfattning:",
+    JSON.stringify(params.diff.diffSummary, null, 2),
+    "",
+    "Ändrade filer:",
+    fileSections,
+  ].join("\n");
+}
+
+async function runConfiguredReviewCommand(command: string, prompt: string, repoRoot: string) {
+  const tempDir = await mkdir(path.join(os.tmpdir(), "ado-auto-review"), { recursive: true }).then(() =>
+    path.join(os.tmpdir(), "ado-auto-review"),
+  );
+  const promptFile = path.join(tempDir, `prompt-${process.pid}-${Date.now()}.txt`);
+  const outputFile = path.join(tempDir, `output-${process.pid}-${Date.now()}.txt`);
+
+  await writeFile(promptFile, prompt, "utf8");
+  await writeFile(outputFile, "", "utf8");
+
+  try {
+    await execFileAsync("cmd.exe", ["/d", "/s", "/c", command], {
+      cwd: repoRoot,
+      env: {
+        ...process.env,
+        ADO_AUTO_REVIEW_PROMPT_FILE: promptFile,
+        ADO_AUTO_REVIEW_OUTPUT_FILE: outputFile,
+      },
+      maxBuffer: 10 * 1024 * 1024,
+    });
+
+    const output = (await readFile(outputFile, "utf8")).trim();
+    if (!output) {
+      throw new Error("Review-kommandot kördes men skrev ingen output till ADO_AUTO_REVIEW_OUTPUT_FILE.");
+    }
+
+    return output;
+  } finally {
+    await rm(promptFile, { force: true }).catch(() => undefined);
+    await rm(outputFile, { force: true }).catch(() => undefined);
+  }
+}
+
+function findExistingAiReviewThread(threads: PullRequestThreadResponse[]) {
+  for (const thread of threads) {
+    if (thread.isDeleted) {
+      continue;
+    }
+
+    for (const comment of thread.comments ?? []) {
+      if (comment.isDeleted) {
+        continue;
+      }
+
+      if (comment.content?.includes(AI_COMMENT_PREFIX) && comment.content?.includes(DEFAULT_PR_REVIEW_TITLE)) {
+        return {
+          threadId: thread.id,
+          commentId: comment.id,
+        };
+      }
+    }
+  }
+
+  return undefined;
+}
+
+async function waitForPullRequestSourceCommit(
+  config: ServerConfig,
+  project: string,
+  repository: string,
+  pullRequestId: number,
+  expectedCommitId: string,
+  attempts = 12,
+  delayMs = 5000,
+) {
+  let latest = await getPullRequest(config, project, repository, pullRequestId);
+  for (let index = 0; index < attempts; index += 1) {
+    const currentCommitId = normalizeCommitId(latest.lastMergeSourceCommit?.commitId);
+    if (currentCommitId === normalizeCommitId(expectedCommitId)) {
+      return latest;
+    }
+
+    await new Promise((resolve) => setTimeout(resolve, delayMs));
+    latest = await getPullRequest(config, project, repository, pullRequestId);
+  }
+
+  return latest;
+}
+
+function parseCliArgs(argv: string[]) {
+  const result = new Map<string, string>();
+  for (let index = 0; index < argv.length; index += 2) {
+    const key = argv[index];
+    const value = argv[index + 1];
+    if (!key?.startsWith("--") || value === undefined) {
+      continue;
+    }
+
+    result.set(key.slice(2), value);
+  }
+
+  return result;
+}
+
+async function runAutoReviewTrigger(argv: string[]) {
+  const args = parseCliArgs(argv);
+  const repoRoot = args.get("repo-root");
+  const branch = args.get("branch");
+  const expectedCommitId = args.get("commit");
+
+  if (!repoRoot || !branch || !expectedCommitId) {
+    throw new Error("auto-review-trigger kräver --repo-root, --branch och --commit.");
+  }
+
+  const pluginRoot = resolvePluginRoot();
+  const settings = await readLocalAutomationSettings(pluginRoot, repoRoot);
+  if (!settings?.automaticCodeReviewPR) {
+    return;
+  }
+
+  if (!settings.automaticCodeReviewPRCommand) {
+    console.error(`automaticCodeReviewPR är aktiverat men automaticCodeReviewPRCommand saknas i ${settings.configFilePath ?? "lokal config"}.`);
+    return;
+  }
+
+  const config = readConfigFromValues(settings.env);
+  const project = ensureProject(undefined, config);
+  const repository = await resolveRepositoryForWorkspace(config, project, repoRoot);
+  const sourceRefName = `refs/heads/${branch}`;
+  const pullRequests = await listPullRequests(config, project, repository.id ?? repository.name ?? "", {
+    status: "active",
+    sourceRefName,
+    top: 10,
+  });
+
+  const selectedPullRequest = pullRequests
+    .filter((pullRequest) => !pullRequest.isDraft)
+    .sort((left, right) => (right.pullRequestId ?? 0) - (left.pullRequestId ?? 0))[0];
+
+  if (!selectedPullRequest?.pullRequestId) {
+    return;
+  }
+
+  const latestPullRequest = await waitForPullRequestSourceCommit(
+    config,
+    project,
+    repository.id ?? repository.name ?? "",
+    selectedPullRequest.pullRequestId,
+    expectedCommitId,
+  );
+
+  const latestSourceCommitId = normalizeCommitId(latestPullRequest.lastMergeSourceCommit?.commitId);
+  if (latestSourceCommitId !== normalizeCommitId(expectedCommitId)) {
+    return;
+  }
+
+  const state = await readAutoReviewState(repoRoot);
+  const stateKey = `${repository.id ?? repository.name}:${selectedPullRequest.pullRequestId}`;
+  const existingState = state.pullRequests?.[stateKey];
+  if (existingState?.lastReviewedSourceCommitId === latestSourceCommitId) {
+    return;
+  }
+
+  const diff = await getPullRequestDiffResult(
+    config,
+    project,
+    repository.id ?? repository.name ?? "",
+    selectedPullRequest.pullRequestId,
+    { maxFiles: 20, maxPatchLines: 500 },
+  );
+
+  const prompt = buildPullRequestReviewPrompt({
+    project,
+    repository: repository.name ?? repository.id ?? "",
+    pullRequest: mapPullRequest(diff.pullRequest),
+    diff,
+  });
+  const reviewText = await runConfiguredReviewCommand(settings.automaticCodeReviewPRCommand, prompt, repoRoot);
+
+  const threads = await listPullRequestThreads(config, project, repository.id ?? repository.name ?? "", selectedPullRequest.pullRequestId);
+  const matchedThread =
+    (existingState?.threadId && existingState.commentId
+      ? { threadId: existingState.threadId, commentId: existingState.commentId }
+      : undefined) ?? findExistingAiReviewThread(threads);
+
+  let nextState: PullRequestReviewState;
+
+  if (matchedThread?.threadId && matchedThread.commentId) {
+    await updatePullRequestComment(
+      config,
+      project,
+      repository.id ?? repository.name ?? "",
+      selectedPullRequest.pullRequestId,
+      matchedThread.threadId,
+      matchedThread.commentId,
+      DEFAULT_PR_REVIEW_TITLE,
+      reviewText,
+    );
+    nextState = {
+      lastReviewedSourceCommitId: latestSourceCommitId,
+      threadId: matchedThread.threadId,
+      commentId: matchedThread.commentId,
+      updatedAt: new Date().toISOString(),
+    };
+  } else {
+    const createdThread = await addPullRequestComment(
+      config,
+      project,
+      repository.id ?? repository.name ?? "",
+      selectedPullRequest.pullRequestId,
+      DEFAULT_PR_REVIEW_TITLE,
+      reviewText,
+    );
+    const rootComment = (createdThread.comments ?? [])[0];
+    nextState = {
+      lastReviewedSourceCommitId: latestSourceCommitId,
+      threadId: createdThread.id,
+      commentId: rootComment?.id,
+      updatedAt: new Date().toISOString(),
+    };
+  }
+
+  await writeAutoReviewState(repoRoot, {
+    ...state,
+    pullRequests: {
+      ...(state.pullRequests ?? {}),
+      [stateKey]: nextState,
+    },
+  });
+}
+
 async function main() {
+  await maybeSyncAutoReviewHook().catch((error) => {
+    console.error(`Kunde inte synkronisera auto review-hook: ${truncate(String(error))}`);
+  });
+
   const server = new Server(
     {
       name: SERVER_NAME,
@@ -1453,24 +2247,21 @@ async function main() {
         }
 
         const resolvedProject = ensureProject(asString(args.project), config);
-        const response = await adoRequest<CollectionListResponse<PullRequestResponse>>(
-          config,
-          `/${encodePathSegment(resolvedProject)}/_apis/git/repositories/${encodePathSegment(repository)}/pullrequests`,
-          undefined,
-          {
-            "searchCriteria.status": asString(args.status) ?? "active",
-            "$top": asNumber(args.top) ?? 25,
-          },
-        );
+        const response = await listPullRequests(config, resolvedProject, repository, {
+          status: asString(args.status) ?? "active",
+          sourceRefName: asString(args.sourceRefName),
+          top: asNumber(args.top) ?? 25,
+        });
 
         return toTextResult({
           project: resolvedProject,
           repository,
-          count: response.count ?? response.value?.length ?? 0,
-          pullRequests: (response.value ?? []).map((pullRequest) => ({
+          count: response.length,
+          pullRequests: response.map((pullRequest) => ({
             id: pullRequest.pullRequestId,
             title: pullRequest.title,
             status: pullRequest.status,
+            isDraft: pullRequest.isDraft ?? false,
             creationDate: pullRequest.creationDate,
             sourceRefName: pullRequest.sourceRefName,
             targetRefName: pullRequest.targetRefName,
@@ -1558,57 +2349,22 @@ async function main() {
         }
 
         const resolvedProject = ensureProject(asString(args.project), config);
-        const maxFiles = Math.min(asNumber(args.maxFiles) ?? 20, 100);
-        const maxPatchLines = Math.min(asNumber(args.maxPatchLines) ?? 400, 2000);
-        const pullRequest = await getPullRequest(config, resolvedProject, repository, pullRequestId);
-        const sourceCommitId = pullRequest.lastMergeSourceCommit?.commitId;
-        const targetCommitId = pullRequest.lastMergeTargetCommit?.commitId;
-
-        if (!sourceCommitId || !targetCommitId) {
-          throw new Error("Pull request saknar commit-information för diff. lastMergeSourceCommit och lastMergeTargetCommit krävs.");
-        }
-
-        const diffResponse = await adoRequest<GitCommitDiffsResponse>(
-          config,
-          `/${encodePathSegment(resolvedProject)}/_apis/git/repositories/${encodePathSegment(repository)}/diffs/commits`,
-          undefined,
-          {
-            "$top": asNumber(args.top) ?? 200,
-            diffCommonCommit: "false",
-            baseVersion: targetCommitId,
-            baseVersionType: "commit",
-            targetVersion: sourceCommitId,
-            targetVersionType: "commit",
-          },
-        );
-
-        const files = await buildReviewDiffFiles(
-          config,
-          resolvedProject,
-          repository,
-          diffResponse.changes ?? [],
-          targetCommitId,
-          sourceCommitId,
-          maxFiles,
-          maxPatchLines,
-        );
+        const diffResult = await getPullRequestDiffResult(config, resolvedProject, repository, pullRequestId, {
+          top: asNumber(args.top) ?? 200,
+          maxFiles: asNumber(args.maxFiles) ?? 20,
+          maxPatchLines: asNumber(args.maxPatchLines) ?? 400,
+        });
 
         return toTextResult({
           project: resolvedProject,
           repository,
           pullRequestId,
-          title: pullRequest.title,
-          sourceCommitId,
-          targetCommitId,
-          diffSummary: {
-            allChangesIncluded: diffResponse.allChangesIncluded ?? false,
-            changeCounts: diffResponse.changeCounts ?? {},
-            commonCommit: diffResponse.commonCommit,
-            aheadCount: diffResponse.aheadCount,
-            behindCount: diffResponse.behindCount,
-          },
-          includedFileCount: files.length,
-          files,
+          title: diffResult.pullRequest.title,
+          sourceCommitId: diffResult.sourceCommitId,
+          targetCommitId: diffResult.targetCommitId,
+          diffSummary: diffResult.diffSummary,
+          includedFileCount: diffResult.files.length,
+          files: diffResult.files,
         });
       }
 
@@ -1625,11 +2381,7 @@ async function main() {
         }
 
         const resolvedProject = ensureProject(asString(args.project), config);
-        const response = await adoRequest<CollectionListResponse<PullRequestThreadResponse> | PullRequestThreadResponse[]>(
-          config,
-          `/${encodePathSegment(resolvedProject)}/_apis/git/repositories/${encodePathSegment(repository)}/pullRequests/${pullRequestId}/threads`,
-        );
-        const threads = normalizeCollection(response);
+        const threads = await listPullRequestThreads(config, resolvedProject, repository, pullRequestId);
 
         return toTextResult({
           project: resolvedProject,
@@ -1659,23 +2411,7 @@ async function main() {
         }
 
         const resolvedProject = ensureProject(asString(args.project), config);
-        const response = await adoRequest<PullRequestThreadResponse>(
-          config,
-          `/${encodePathSegment(resolvedProject)}/_apis/git/repositories/${encodePathSegment(repository)}/pullRequests/${pullRequestId}/threads`,
-          {
-            method: "POST",
-            body: JSON.stringify({
-              comments: [
-                {
-                  parentCommentId: 0,
-                  content: formatAiGeneratedComment(title, text),
-                  commentType: 1,
-                },
-              ],
-              status: 1,
-            }),
-          },
-        );
+        const response = await addPullRequestComment(config, resolvedProject, repository, pullRequestId, title, text);
 
         return toTextResult({
           action: "created",
@@ -1683,6 +2419,56 @@ async function main() {
           repository,
           pullRequestId,
           thread: mapPullRequestThread(response),
+        });
+      }
+
+      case "ado_update_pull_request_comment": {
+        const config = readConfig();
+        const repository = asString(args.repository);
+        const pullRequestId = asNumber(args.pullRequestId);
+        const threadId = asNumber(args.threadId);
+        const commentId = asNumber(args.commentId);
+        const title = asString(args.title) ?? DEFAULT_PR_REVIEW_TITLE;
+        const text = asString(args.text);
+        if (!repository) {
+          throw new Error("repository är obligatorisk.");
+        }
+
+        if (!pullRequestId || pullRequestId < 1) {
+          throw new Error("pullRequestId måste vara ett positivt tal.");
+        }
+
+        if (!threadId || threadId < 1) {
+          throw new Error("threadId måste vara ett positivt tal.");
+        }
+
+        if (!commentId || commentId < 1) {
+          throw new Error("commentId måste vara ett positivt tal.");
+        }
+
+        if (!text) {
+          throw new Error("text är obligatorisk.");
+        }
+
+        const resolvedProject = ensureProject(asString(args.project), config);
+        const response = await updatePullRequestComment(
+          config,
+          resolvedProject,
+          repository,
+          pullRequestId,
+          threadId,
+          commentId,
+          title,
+          text,
+        );
+
+        return toTextResult({
+          action: "updated",
+          project: resolvedProject,
+          repository,
+          pullRequestId,
+          threadId,
+          comment: mapPullRequestComment(response),
         });
       }
 
@@ -2142,7 +2928,17 @@ async function main() {
   await server.connect(transport);
 }
 
-main().catch((error) => {
+async function entrypoint() {
+  const [command, ...rest] = process.argv.slice(2);
+  if (command === "auto-review-trigger") {
+    await runAutoReviewTrigger(rest);
+    return;
+  }
+
+  await main();
+}
+
+entrypoint().catch((error) => {
   console.error(error);
   process.exit(1);
 });
