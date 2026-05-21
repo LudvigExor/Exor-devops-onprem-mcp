@@ -12,6 +12,8 @@ import { existsSync } from "node:fs";
 import { chmod, mkdir, readFile, rm, stat, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
+import { createInterface } from "node:readline/promises";
+import { stdin as input, stdout as output } from "node:process";
 import { promisify } from "node:util";
 import { fileURLToPath } from "node:url";
 
@@ -26,6 +28,7 @@ type ServerConfig = {
 };
 
 type LocalConfigServerEntry = {
+  type?: string;
   command?: string;
   args?: string[];
   env?: Record<string, string>;
@@ -43,6 +46,8 @@ type LocalConfigFile = {
   mcpServers?: Record<string, LocalConfigServerEntry>;
   pluginSettings?: Record<string, LocalPluginSettingsEntry>;
   plugins?: Record<string, LocalPluginSettingsEntry>;
+  inputs?: unknown[];
+  [key: string]: unknown;
 };
 
 type LocalAutomationSettings = {
@@ -51,6 +56,21 @@ type LocalAutomationSettings = {
   serverName?: string;
   configFilePath?: string;
   env: Record<string, string>;
+};
+
+type SetupCommandOptions = {
+  repoRoot: string;
+  serverName: string;
+  baseUrl: string;
+  defaultProject?: string;
+  apiVersion: string;
+  commentsApiVersion: string;
+  useDefaultCredentials: boolean;
+  pat?: string;
+  basicUsername?: string;
+  basicPassword?: string;
+  authHeader?: string;
+  writeUserConfig: boolean;
 };
 
 type QueryValue = string | number | boolean | undefined;
@@ -194,8 +214,11 @@ type BuildResponse = {
 
 const DEFAULT_API_VERSION = "5.1";
 const DEFAULT_PR_REVIEW_TITLE = "Kodgranskning av AI";
+const DEFAULT_AUTO_REVIEW_PROMPT_MAX_CHARS = 24000;
 const AI_COMMENT_PREFIX = "AI-genererad kommentar:";
 const MANAGED_HOOK_MARKER = "# exor-ado-auto-review managed hook";
+const MANAGED_AGENT_GUIDE_START = "<!-- exor-ado-onprem-mcp setup start -->";
+const MANAGED_AGENT_GUIDE_END = "<!-- exor-ado-onprem-mcp setup end -->";
 const SERVER_NAME = "azure-devops-onprem";
 
 type CommentAuthorResponse = {
@@ -802,80 +825,23 @@ function toTextResult(value: unknown): CallToolResult {
   };
 }
 
-function escapeHtml(value: string): string {
-  return value
-    .replace(/&/g, "&amp;")
-    .replace(/</g, "&lt;")
-    .replace(/>/g, "&gt;")
-    .replace(/"/g, "&quot;")
-    .replace(/'/g, "&#39;");
-}
-
-function formatTextBodyAsHtml(text: string): string {
-  const normalizedLines = text.replace(/\r\n/g, "\n").split("\n");
-  const htmlParts: string[] = [];
-  let currentListType: "ol" | "ul" | null = null;
-
-  const closeList = () => {
-    if (currentListType) {
-      htmlParts.push(`</${currentListType}>`);
-      currentListType = null;
-    }
-  };
-
-  for (const rawLine of normalizedLines) {
-    const line = rawLine.trim();
-
-    if (!line) {
-      closeList();
-      continue;
-    }
-
-    const orderedMatch = line.match(/^\d+\.\s+(.*)$/);
-    if (orderedMatch) {
-      if (currentListType !== "ol") {
-        closeList();
-        htmlParts.push("<ol>");
-        currentListType = "ol";
-      }
-
-      htmlParts.push(`<li>${escapeHtml(orderedMatch[1])}</li>`);
-      continue;
-    }
-
-    const unorderedMatch = line.match(/^-\s+(.*)$/);
-    if (unorderedMatch) {
-      if (currentListType !== "ul") {
-        closeList();
-        htmlParts.push("<ul>");
-        currentListType = "ul";
-      }
-
-      htmlParts.push(`<li>${escapeHtml(unorderedMatch[1])}</li>`);
-      continue;
-    }
-
-    closeList();
-    htmlParts.push(`<p>${escapeHtml(line)}</p>`);
-  }
-
-  closeList();
-  return htmlParts.join("");
+function escapeMarkdownInline(value: string): string {
+  return value.replace(/([\\`*_{}\[\]()#+\-.!|>])/g, "\\$1");
 }
 
 function formatAiGeneratedComment(title: string, text: string): string {
   const trimmedTitle = title.trim();
-  const trimmedText = text.trim();
+  const normalizedText = text.replace(/\r\n/g, "\n").trim();
 
   if (!trimmedTitle) {
     throw new Error("title är obligatorisk.");
   }
 
-  if (!trimmedText) {
+  if (!normalizedText) {
     throw new Error("text är obligatorisk.");
   }
 
-  return `<p><i>${escapeHtml(AI_COMMENT_PREFIX)}</i></p><p>&nbsp;</p><p><strong>${escapeHtml(trimmedTitle)}</strong></p>${formatTextBodyAsHtml(trimmedText)}`;
+  return `*${escapeMarkdownInline(AI_COMMENT_PREFIX)}*\n\n### ${escapeMarkdownInline(trimmedTitle)}\n\n${normalizedText}`;
 }
 
 function mapComment(comment: CommentResponse) {
@@ -1370,8 +1336,12 @@ if ($env:REQUEST_BODY) {
   $params['ContentType'] = 'application/json'
   $params['Body'] = $env:REQUEST_BODY
 }
-$response = Invoke-WebRequest @params
-[Console]::Out.Write($response.Content)
+$response = Invoke-RestMethod @params
+if ($null -eq $response) {
+  [Console]::Out.Write('null')
+} else {
+  [Console]::Out.Write(($response | ConvertTo-Json -Depth 100 -Compress))
+}
 `;
 
   const encodedScript = Buffer.from(script, "utf16le").toString("base64");
@@ -1390,7 +1360,11 @@ $response = Invoke-WebRequest @params
     throw new Error(truncate(stderr.trim()));
   }
 
-  return JSON.parse(stdout) as T;
+  try {
+    return JSON.parse(stdout) as T;
+  } catch (error) {
+    throw new Error(`Kunde inte tolka JSON-svar från PowerShell-anrop: ${truncate(stdout)} (${truncate(String(error))})`);
+  }
 }
 
 function asString(value: unknown): string | undefined {
@@ -1659,7 +1633,7 @@ async function getPullRequestDiffResult(
     undefined,
     {
       "$top": options.top ?? 200,
-      diffCommonCommit: "false",
+      diffCommonCommit: "true",
       baseVersion: targetCommitId,
       baseVersionType: "commit",
       targetVersion: sourceCommitId,
@@ -1711,6 +1685,17 @@ function getUserConfigCandidates() {
     path.join(homeDir, ".copilot", "mcp-config.json"),
     path.join(homeDir, ".codex", "mcp-config.json"),
     path.join(homeDir, ".claude", "mcp-config.json"),
+    path.join(homeDir, ".cursor", "mcp-config.json"),
+  ];
+}
+
+function getClientConfigTargets() {
+  const homeDir = os.homedir();
+  return [
+    { clientName: "copilot", filePath: path.join(homeDir, ".copilot", "mcp-config.json") },
+    { clientName: "codex", filePath: path.join(homeDir, ".codex", "mcp-config.json") },
+    { clientName: "claude", filePath: path.join(homeDir, ".claude", "mcp-config.json") },
+    { clientName: "cursor", filePath: path.join(homeDir, ".cursor", "mcp-config.json") },
   ];
 }
 
@@ -1745,6 +1730,132 @@ function normalizeStringRecord(values: Record<string, string | undefined>) {
   return Object.fromEntries(
     Object.entries(values).filter(([, value]) => typeof value === "string"),
   ) as Record<string, string>;
+}
+
+function parseBooleanFlag(value: string | undefined, fallback: boolean) {
+  if (!value) {
+    return fallback;
+  }
+
+  const normalized = value.trim().toLowerCase();
+  if (["1", "true", "yes", "ja"].includes(normalized)) {
+    return true;
+  }
+
+  if (["0", "false", "no", "nej"].includes(normalized)) {
+    return false;
+  }
+
+  return fallback;
+}
+
+function escapeRegex(value: string) {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+function jsonStringify(value: unknown) {
+  return `${JSON.stringify(value, null, 2)}\n`;
+}
+
+function isPlainObject(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function normalizeJsonObject(value: unknown): Record<string, unknown> {
+  return isPlainObject(value) ? { ...value } : {};
+}
+
+async function readOptionalJsonObject(filePath: string) {
+  if (!existsSync(filePath)) {
+    return {};
+  }
+
+  const parsed = await readJsonFile<unknown>(filePath);
+  if (!isPlainObject(parsed)) {
+    throw new Error(`${filePath} innehåller inte ett JSON-objekt.`);
+  }
+
+  return { ...parsed };
+}
+
+function buildSetupServerEnv(options: SetupCommandOptions) {
+  const env: Record<string, string> = {
+    ADO_BASE_URL: options.baseUrl,
+    ADO_API_VERSION: options.apiVersion,
+    ADO_COMMENTS_API_VERSION: options.commentsApiVersion,
+  };
+
+  if (options.defaultProject) {
+    env.ADO_DEFAULT_PROJECT = options.defaultProject;
+  }
+
+  if (options.authHeader) {
+    env.ADO_AUTH_HEADER = options.authHeader;
+  } else if (options.pat) {
+    env.ADO_PAT = options.pat;
+  } else if (options.basicUsername) {
+    env.ADO_BASIC_USERNAME = options.basicUsername;
+    env.ADO_BASIC_PASSWORD = options.basicPassword ?? "";
+  } else if (options.useDefaultCredentials) {
+    env.ADO_USE_DEFAULT_CREDENTIALS = "true";
+  }
+
+  return env;
+}
+
+function buildSetupEntryCommand(pluginRoot: string) {
+  const distEntry = path.join(pluginRoot, "dist", "index.js");
+  if (existsSync(distEntry)) {
+    return {
+      command: "node",
+      args: [distEntry],
+    };
+  }
+
+  return {
+    command: "node",
+    args: [path.join(pluginRoot, "node_modules", "tsx", "dist", "cli.mjs"), path.join(pluginRoot, "src", "index.ts")],
+  };
+}
+
+function buildRepoServerEntry(serverName: string, pluginRoot: string, options: SetupCommandOptions): LocalConfigServerEntry {
+  const entryCommand = buildSetupEntryCommand(pluginRoot);
+  return {
+    type: "stdio",
+    command: entryCommand.command,
+    args: entryCommand.args,
+    env: buildSetupServerEnv(options),
+  };
+}
+
+function getManagedAgentGuideText(serverName: string) {
+  return [
+    MANAGED_AGENT_GUIDE_START,
+    "## Azure DevOps Onprem MCP",
+    "",
+    `Det finns en repo-lokal MCP-server i \`.mcp.json\` med servernamnet \`${serverName}\`.`,
+    "",
+    "När du behöver läsa eller kommentera work items, buggar, pull requests, repositories eller builds i Azure DevOps ska du i första hand använda den konfigurerade MCP-servern i stället för rå PowerShell eller direkta REST-anrop.",
+    "",
+    "Använd bara PowerShell eller manuella HTTP-anrop om MCP-servern saknar stöd för operationen eller om servern inte är tillgänglig.",
+    MANAGED_AGENT_GUIDE_END,
+    "",
+  ].join("\n");
+}
+
+function upsertManagedBlock(content: string | undefined, block: string, startMarker: string, endMarker: string) {
+  const trimmedContent = content?.trimEnd() ?? "";
+  const pattern = new RegExp(`${escapeRegex(startMarker)}[\\s\\S]*?${escapeRegex(endMarker)}\\s*`, "m");
+
+  if (trimmedContent.length === 0) {
+    return block;
+  }
+
+  if (pattern.test(trimmedContent)) {
+    return `${trimmedContent.replace(pattern, block.trimEnd())}\n`;
+  }
+
+  return `${trimmedContent}\n\n${block}`;
 }
 
 async function readRepoServerEnv(pluginRoot: string, repoRoot: string) {
@@ -1864,8 +1975,8 @@ function getManagedHookPath(repoRoot: string) {
 
 function buildManagedHookScript(pluginRoot: string) {
   const nodePath = process.execPath.replace(/\\/g, "/");
-  const tsxPath = path.join(pluginRoot, "node_modules", "tsx", "dist", "cli.mjs").replace(/\\/g, "/");
-  const entryPath = path.join(pluginRoot, "src", "index.ts").replace(/\\/g, "/");
+  const entryCommand = buildSetupEntryCommand(pluginRoot);
+  const entryArgs = entryCommand.args.map((arg) => `"${arg.replace(/\\/g, "/")}"`).join(" ");
 
   return `#!/bin/sh
 ${MANAGED_HOOK_MARKER}
@@ -1877,7 +1988,7 @@ CURRENT_COMMIT=$(git rev-parse HEAD 2>/dev/null)
 if [ -z "$REPO_ROOT" ] || [ -z "$CURRENT_BRANCH" ] || [ "$CURRENT_BRANCH" = "HEAD" ] || [ -z "$CURRENT_COMMIT" ]; then
   exit 0
 fi
-"${nodePath}" "${tsxPath}" "${entryPath}" auto-review-trigger --repo-root "$REPO_ROOT" --branch "$CURRENT_BRANCH" --commit "$CURRENT_COMMIT" --remote-name "$REMOTE_NAME" --remote-url "$REMOTE_URL" >/dev/null 2>&1 &
+"${nodePath}" ${entryArgs} auto-review-trigger --repo-root "$REPO_ROOT" --branch "$CURRENT_BRANCH" --commit "$CURRENT_COMMIT" --remote-name "$REMOTE_NAME" --remote-url "$REMOTE_URL" >/dev/null 2>&1 &
 exit 0
 `;
 }
@@ -1926,6 +2037,199 @@ async function maybeSyncAutoReviewHook() {
   }
 
   await syncManagedHook(repoRoot, pluginRoot, settings.automaticCodeReviewPR);
+}
+
+async function resolveSetupRepoRoot(explicitRepoRoot: string | undefined, pluginRoot: string) {
+  const candidate = explicitRepoRoot ? path.resolve(explicitRepoRoot) : process.cwd();
+  const gitRepoRoot = await resolveGitRepoRoot(candidate);
+  const repoRoot = gitRepoRoot ? path.resolve(gitRepoRoot) : candidate;
+
+  if (!explicitRepoRoot && normalizePathForComparison(repoRoot) === normalizePathForComparison(pluginRoot)) {
+    throw new Error("Setup kördes i plugin-repot. Kör kommandot från målrepoet eller ange --repo-root.");
+  }
+
+  return repoRoot;
+}
+
+async function promptSetupValue(question: string, defaultValue?: string) {
+  const canPrompt = process.stdin.isTTY && process.stdout.isTTY;
+  if (!canPrompt) {
+    return defaultValue;
+  }
+
+  const readline = createInterface({ input, output });
+  try {
+    const suffix = defaultValue ? ` [${defaultValue}]` : "";
+    const answer = await readline.question(`${question}${suffix}: `);
+    const trimmed = answer.trim();
+    return trimmed || defaultValue;
+  } finally {
+    readline.close();
+  }
+}
+
+async function resolveSetupValue(value: string | undefined, question: string, defaultValue?: string) {
+  const trimmed = value?.trim();
+  if (trimmed) {
+    return trimmed;
+  }
+
+  return (await promptSetupValue(question, defaultValue))?.trim();
+}
+
+async function resolveSetupOptions(parsedArgs: Map<string, string>, pluginRoot: string, repoRoot: string): Promise<SetupCommandOptions> {
+  const existingEnv = (await readRepoServerEnv(pluginRoot, repoRoot)) ?? {};
+  const resolvedBaseUrl = await resolveSetupValue(
+    parsedArgs.get("ado-base-url") || process.env.ADO_BASE_URL || existingEnv.ADO_BASE_URL,
+    "ADO_BASE_URL",
+    existingEnv.ADO_BASE_URL,
+  );
+  if (!resolvedBaseUrl) {
+    throw new Error("ADO_BASE_URL saknas. Ange --ado-base-url, sätt ADO_BASE_URL eller kör setup interaktivt i en terminal.");
+  }
+
+  const resolvedApiVersion =
+    parsedArgs.get("ado-api-version")?.trim() ||
+    process.env.ADO_API_VERSION?.trim() ||
+    existingEnv.ADO_API_VERSION?.trim() ||
+    DEFAULT_API_VERSION;
+
+  const authSources = [
+    parsedArgs.get("ado-auth-header")?.trim() || process.env.ADO_AUTH_HEADER?.trim() || existingEnv.ADO_AUTH_HEADER?.trim(),
+    parsedArgs.get("ado-pat")?.trim() || process.env.ADO_PAT?.trim() || existingEnv.ADO_PAT?.trim(),
+    parsedArgs.get("ado-basic-username")?.trim() ||
+      process.env.ADO_BASIC_USERNAME?.trim() ||
+      existingEnv.ADO_BASIC_USERNAME?.trim(),
+    parseBooleanFlag(parsedArgs.get("ado-use-default-credentials") ?? process.env.ADO_USE_DEFAULT_CREDENTIALS, process.platform === "win32")
+      ? "windows"
+      : undefined,
+  ].filter((value) => typeof value === "string" && value.length > 0);
+
+  if (authSources.length === 0 && process.platform !== "win32") {
+    throw new Error(
+      "Ingen autentisering hittades. Ange till exempel --ado-use-default-credentials true, --ado-pat eller --ado-auth-header.",
+    );
+  }
+
+  return {
+    repoRoot,
+    serverName: parsedArgs.get("server-name")?.trim() || SERVER_NAME,
+    baseUrl: resolvedBaseUrl!,
+    defaultProject:
+      (await resolveSetupValue(
+        parsedArgs.get("ado-default-project") || process.env.ADO_DEFAULT_PROJECT || existingEnv.ADO_DEFAULT_PROJECT,
+        "ADO_DEFAULT_PROJECT (valfritt)",
+        existingEnv.ADO_DEFAULT_PROJECT,
+      )) || undefined,
+    apiVersion: resolvedApiVersion,
+    commentsApiVersion:
+      parsedArgs.get("ado-comments-api-version")?.trim() ||
+      process.env.ADO_COMMENTS_API_VERSION?.trim() ||
+      existingEnv.ADO_COMMENTS_API_VERSION?.trim() ||
+      `${resolvedApiVersion}-preview.3`,
+    useDefaultCredentials: parseBooleanFlag(
+      parsedArgs.get("ado-use-default-credentials") ?? process.env.ADO_USE_DEFAULT_CREDENTIALS ?? existingEnv.ADO_USE_DEFAULT_CREDENTIALS,
+      process.platform === "win32",
+    ),
+    pat: parsedArgs.get("ado-pat")?.trim() || process.env.ADO_PAT?.trim() || existingEnv.ADO_PAT?.trim() || undefined,
+    basicUsername:
+      parsedArgs.get("ado-basic-username")?.trim() ||
+      process.env.ADO_BASIC_USERNAME?.trim() ||
+      existingEnv.ADO_BASIC_USERNAME?.trim() ||
+      undefined,
+    basicPassword: parsedArgs.get("ado-basic-password") ?? process.env.ADO_BASIC_PASSWORD ?? existingEnv.ADO_BASIC_PASSWORD ?? undefined,
+    authHeader:
+      parsedArgs.get("ado-auth-header")?.trim() || process.env.ADO_AUTH_HEADER?.trim() || existingEnv.ADO_AUTH_HEADER?.trim() || undefined,
+    writeUserConfig: parseBooleanFlag(parsedArgs.get("write-user-config"), false),
+  };
+}
+
+async function writeSetupRepoConfig(pluginRoot: string, options: SetupCommandOptions) {
+  const filePath = path.join(options.repoRoot, ".mcp.json");
+  const config = await readOptionalJsonObject(filePath);
+  const targetProperty = isPlainObject(config.servers) || !isPlainObject(config.mcpServers) ? "servers" : "mcpServers";
+  const existingServers = normalizeJsonObject(config[targetProperty]);
+  const nextConfig = {
+    ...config,
+    inputs: Array.isArray(config.inputs) ? config.inputs : [],
+    [targetProperty]: {
+      ...existingServers,
+      [options.serverName]: buildRepoServerEntry(options.serverName, pluginRoot, options),
+    },
+  };
+
+  await writeFile(filePath, jsonStringify(nextConfig), "utf8");
+  return filePath;
+}
+
+async function writeSetupUserConfigs(pluginRoot: string, options: SetupCommandOptions) {
+  const results: Array<{ clientName: string; filePath: string }> = [];
+  const pluginSettingsKey = SERVER_NAME;
+
+  for (const target of getClientConfigTargets()) {
+    const directoryPath = path.dirname(target.filePath);
+    if (!existsSync(directoryPath)) {
+      continue;
+    }
+
+    const config = await readOptionalJsonObject(target.filePath);
+    const pluginSettings = normalizeJsonObject(config.pluginSettings);
+    const currentSettings = normalizeJsonObject(pluginSettings[pluginSettingsKey]);
+    const nextConfig = {
+      ...config,
+      pluginSettings: {
+        ...pluginSettings,
+        [pluginSettingsKey]: {
+          ...currentSettings,
+          automaticCodeReviewPR: currentSettings.automaticCodeReviewPR === true,
+        },
+      },
+    };
+
+    await writeFile(target.filePath, jsonStringify(nextConfig), "utf8");
+    results.push(target);
+  }
+
+  const settings = await readLocalAutomationSettings(pluginRoot, options.repoRoot);
+  if (settings) {
+    await syncManagedHook(options.repoRoot, pluginRoot, settings.automaticCodeReviewPR);
+  }
+
+  return results;
+}
+
+async function writeSetupAgentGuide(repoRoot: string, serverName: string) {
+  const filePath = path.join(repoRoot, "AGENTS.md");
+  const currentContent = existsSync(filePath) ? await readFile(filePath, "utf8") : undefined;
+  const nextContent = upsertManagedBlock(
+    currentContent,
+    getManagedAgentGuideText(serverName),
+    MANAGED_AGENT_GUIDE_START,
+    MANAGED_AGENT_GUIDE_END,
+  );
+  await writeFile(filePath, nextContent, "utf8");
+  return filePath;
+}
+
+async function runSetupCommand(parsedArgs: Map<string, string>) {
+  const pluginRoot = resolvePluginRoot();
+  const repoRoot = await resolveSetupRepoRoot(parsedArgs.get("repo-root"), pluginRoot);
+  const options = await resolveSetupOptions(parsedArgs, pluginRoot, repoRoot);
+  const repoConfigPath = await writeSetupRepoConfig(pluginRoot, options);
+  const agentGuidePath = await writeSetupAgentGuide(options.repoRoot, options.serverName);
+  const userConfigFiles = options.writeUserConfig ? await writeSetupUserConfigs(pluginRoot, options) : [];
+
+  const lines = [
+    "Setup klart.",
+    `Repo-konfig: ${repoConfigPath}`,
+    `Agent-instruktioner: ${agentGuidePath}`,
+    options.writeUserConfig && userConfigFiles.length > 0
+      ? `Klientkonfig: ${userConfigFiles.map((entry) => `${entry.clientName}=${entry.filePath}`).join(", ")}`
+      : options.writeUserConfig
+        ? "Klientkonfig: inga kända agentmappar hittades under hemkatalogen."
+        : "Klientkonfig: hoppades över. Använd exempel-filen om du vill lägga till lokal auto-review-config.",
+  ];
+  console.log(lines.join("\n"));
 }
 
 function normalizeRemoteIdentity(value: string | undefined) {
@@ -2102,27 +2406,55 @@ async function runConfiguredReviewCommand(command: string, prompt: string, repoR
   }
 }
 
-function findExistingAiReviewThread(threads: PullRequestThreadResponse[]) {
-  for (const thread of threads) {
-    if (thread.isDeleted) {
-      continue;
-    }
-
-    for (const comment of thread.comments ?? []) {
-      if (comment.isDeleted) {
-        continue;
-      }
-
-      if (comment.content?.includes(AI_COMMENT_PREFIX) && comment.content?.includes(DEFAULT_PR_REVIEW_TITLE)) {
-        return {
-          threadId: thread.id,
-          commentId: comment.id,
-        };
-      }
-    }
+function truncateAutoReviewPromptForCli(prompt: string) {
+  const normalized = prompt.replace(/\r\n/g, "\n");
+  if (normalized.length <= DEFAULT_AUTO_REVIEW_PROMPT_MAX_CHARS) {
+    return normalized;
   }
 
-  return undefined;
+  return `${normalized.slice(0, DEFAULT_AUTO_REVIEW_PROMPT_MAX_CHARS)}\n\n...[review prompt truncated after ${DEFAULT_AUTO_REVIEW_PROMPT_MAX_CHARS} characters]`;
+}
+
+async function runBuiltInReviewCommand(prompt: string, repoRoot: string) {
+  const truncatedPrompt = truncateAutoReviewPromptForCli(prompt);
+
+  try {
+    const { stdout } = await execFileAsync(
+      "copilot",
+      ["-C", repoRoot, "-s", "--no-custom-instructions", "--allow-all-tools", "-p", truncatedPrompt],
+      {
+        cwd: repoRoot,
+        env: process.env,
+        maxBuffer: 10 * 1024 * 1024,
+      },
+    );
+
+    const output = stdout.trim();
+    if (!output) {
+      throw new Error("Inbyggd auto-review via GitHub Copilot CLI returnerade ingen text.");
+    }
+
+    return output;
+  } catch (error) {
+    const errorCode = typeof error === "object" && error !== null && "code" in error ? String(error.code) : undefined;
+    const errorMessage = truncate(String(error));
+
+    if (errorCode === "ENOENT") {
+      throw new Error(
+        "automaticCodeReviewPR är aktiverat men GitHub Copilot CLI hittades inte i PATH. Installera copilot.exe eller ange automaticCodeReviewPRCommand som override.",
+      );
+    }
+
+    throw new Error(`Inbyggd auto-review via GitHub Copilot CLI misslyckades: ${errorMessage}`);
+  }
+}
+
+async function generateAutoReviewText(prompt: string, repoRoot: string, configuredCommand?: string) {
+  if (configuredCommand?.trim()) {
+    return runConfiguredReviewCommand(configuredCommand, prompt, repoRoot);
+  }
+
+  return runBuiltInReviewCommand(prompt, repoRoot);
 }
 
 async function waitForPullRequestSourceCommit(
@@ -2210,11 +2542,6 @@ async function runAutoReviewTrigger(argv: string[]) {
     return;
   }
 
-  if (!settings.automaticCodeReviewPRCommand) {
-    console.error(`automaticCodeReviewPR är aktiverat men automaticCodeReviewPRCommand saknas i ${settings.configFilePath ?? "lokal config"}.`);
-    return;
-  }
-
   const config = readConfigFromValues(settings.env);
   const project = ensureProject(undefined, config);
   const repository = await resolveRepositoryForWorkspace(config, project, repoRoot);
@@ -2271,50 +2598,22 @@ async function runAutoReviewTrigger(argv: string[]) {
     diff,
     relatedWorkItems,
   });
-  const reviewText = await runConfiguredReviewCommand(settings.automaticCodeReviewPRCommand, prompt, repoRoot);
-
-  const threads = await listPullRequestThreads(config, project, repository.id ?? repository.name ?? "", selectedPullRequest.pullRequestId);
-  const matchedThread =
-    (existingState?.threadId && existingState.commentId
-      ? { threadId: existingState.threadId, commentId: existingState.commentId }
-      : undefined) ?? findExistingAiReviewThread(threads);
-
-  let nextState: PullRequestReviewState;
-
-  if (matchedThread?.threadId && matchedThread.commentId) {
-    await updatePullRequestComment(
-      config,
-      project,
-      repository.id ?? repository.name ?? "",
-      selectedPullRequest.pullRequestId,
-      matchedThread.threadId,
-      matchedThread.commentId,
-      DEFAULT_PR_REVIEW_TITLE,
-      reviewText,
-    );
-    nextState = {
-      lastReviewedSourceCommitId: latestSourceCommitId,
-      threadId: matchedThread.threadId,
-      commentId: matchedThread.commentId,
-      updatedAt: new Date().toISOString(),
-    };
-  } else {
-    const createdThread = await addPullRequestComment(
-      config,
-      project,
-      repository.id ?? repository.name ?? "",
-      selectedPullRequest.pullRequestId,
-      DEFAULT_PR_REVIEW_TITLE,
-      reviewText,
-    );
-    const rootComment = (createdThread.comments ?? [])[0];
-    nextState = {
-      lastReviewedSourceCommitId: latestSourceCommitId,
-      threadId: createdThread.id,
-      commentId: rootComment?.id,
-      updatedAt: new Date().toISOString(),
-    };
-  }
+  const reviewText = await generateAutoReviewText(prompt, repoRoot, settings.automaticCodeReviewPRCommand);
+  const createdThread = await addPullRequestComment(
+    config,
+    project,
+    repository.id ?? repository.name ?? "",
+    selectedPullRequest.pullRequestId,
+    DEFAULT_PR_REVIEW_TITLE,
+    reviewText,
+  );
+  const rootComment = (createdThread.comments ?? [])[0];
+  const nextState: PullRequestReviewState = {
+    lastReviewedSourceCommitId: latestSourceCommitId,
+    threadId: createdThread.id,
+    commentId: rootComment?.id,
+    updatedAt: new Date().toISOString(),
+  };
 
   await writeAutoReviewState(repoRoot, {
     ...state,
@@ -3129,6 +3428,11 @@ async function entrypoint() {
   const [command, ...rest] = process.argv.slice(2);
   if (command === "auto-review-trigger") {
     await runAutoReviewTrigger(rest);
+    return;
+  }
+
+  if (command === "setup") {
+    await runSetupCommand(parseCliArgs(rest));
     return;
   }
 

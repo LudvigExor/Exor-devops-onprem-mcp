@@ -8,7 +8,9 @@
   "scripts": {
     "build": "tsc -p tsconfig.json",
     "start": "tsx src/index.ts",
-    "start:prod": "node dist/index.js"
+    "start:prod": "node dist/index.js",
+    "setup": "tsx src/index.ts setup",
+    "setup:prod": "node dist/index.js setup"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.29.0",

@@ -121,10 +121,14 @@ Om både PR-länkar och commit-länkar finns får agenten använda båda som gra
 
 Kommentarer ska vara:
 
-- kortfattade först
-- konkreta
+- På samma språk som PR beskrivning eller work items beskrivning, beroende på vad kommentaren ska postas.
+kortfattade först
+- korta och koncisa
+- konkreta och relevanta
 - lätta att skumma
 - tillräckligt informativa för att senare kunna användas som underlag för implementation
+
+Undvik onödigt långa utläggningar. Om en kortare formulering räcker ska agenten välja den.
 
 Om texten är på svenska ska agenten skriva korrekt svenska och bevara svenska tecken som `å`, `ä` och `ö`.
 

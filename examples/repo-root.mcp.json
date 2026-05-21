@@ -1,17 +1,11 @@
 {
   "inputs": [],
   "servers": {
-    "ado-onprem": {
+    "azure-devops-onprem": {
       "type": "stdio",
-      "command": "cmd",
+      "command": "node",
       "args": [
-        "/c",
-        "npm",
-        "run",
-        "start",
-        "--silent",
-        "--prefix",
-        "C:\\path\\to\\Exor-devops-onprem-mcp"
+        "C:\\path\\to\\Exor-devops-onprem-mcp\\dist\\index.js"
       ],
       "env": {
         "ADO_BASE_URL": "http://server:8080/tfs/CollectionName",

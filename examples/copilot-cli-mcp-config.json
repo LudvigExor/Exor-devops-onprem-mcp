@@ -1,32 +1,7 @@
 {
-  "mcpServers": {
-    "ado-onprem": {
-      "command": "cmd",
-      "args": [
-        "/c",
-        "npm",
-        "run",
-        "start",
-        "--silent",
-        "--prefix",
-        "C:\\path\\to\\Exor-devops-onprem-mcp"
-      ],
-      "env": {
-        "ADO_BASE_URL": "http://server:8080/tfs/CollectionName",
-        "ADO_DEFAULT_PROJECT": "ProjectName",
-        "ADO_API_VERSION": "5.1",
-        "ADO_COMMENTS_API_VERSION": "5.1-preview.3",
-        "ADO_USE_DEFAULT_CREDENTIALS": "true"
-      },
-      "tools": [
-        "*"
-      ]
-    }
-  },
   "pluginSettings": {
     "azure-devops-onprem": {
-      "automaticCodeReviewPR": false,
-      "automaticCodeReviewPRCommand": "powershell -NoProfile -File C:\\path\\to\\run-auto-review.ps1"
+      "automaticCodeReviewPR": false
     }
   }
 }
