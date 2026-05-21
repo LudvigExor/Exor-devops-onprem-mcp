@@ -54,9 +54,10 @@ Alla kommentarer som skapas eller uppdateras via pluginen ska utgå från detta 
 
 1. Första raden är alltid:
    - `AI-genererad kommentar:`
-2. Därefter titel på ny rad, till exempel:
+2. Därefter en tom rad
+3. Därefter titel på ny rad, till exempel:
    - `Implementation plan`
-3. Därefter själva innehållet
+4. Därefter själva innehållet
 
 Pluginen lägger in prefixet automatiskt. Som agent ska du därför fokusera på:
 

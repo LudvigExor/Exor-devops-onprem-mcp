@@ -768,7 +768,7 @@ function formatAiGeneratedComment(title: string, text: string): string {
     throw new Error("text är obligatorisk.");
   }
 
-  return `<p><i>AI-genererad kommentar:</i></p><p><strong>${escapeHtml(trimmedTitle)}</strong></p>${formatTextBodyAsHtml(trimmedText)}`;
+  return `<p><i>AI-genererad kommentar:</i></p><p>&nbsp;</p><p><strong>${escapeHtml(trimmedTitle)}</strong></p>${formatTextBodyAsHtml(trimmedText)}`;
 }
 
 function mapComment(comment: CommentResponse) {

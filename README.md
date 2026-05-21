@@ -123,6 +123,8 @@ Alla kommentarer som skapas via pluginen börjar med:
 
 `AI-genererad kommentar:`
 
+Sedan kommer alltid en tom rad innan titel och innehåll.
+
 För PR-kodgranskning används normalt titeln:
 
 `Kodgranskning av AI`
