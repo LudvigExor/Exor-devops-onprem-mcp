@@ -185,6 +185,9 @@ Servern kan också:
 - läsa commits i en pull request
 - läsa diff i en pull request
 - skapa en övergripande AI-kommentar i en pull request
+- läsa utvecklingslänkar från ett work item
+- hitta associerade completed PR:er och direkta commits från ett work item
+- posta kodgranskning som kommentar i work item
 
 Servern kan inte ändra annan work item-data eller annan PR-data.
 
@@ -266,6 +269,33 @@ och med titeln:
 `Kodgranskning av AI`
 
 Därefter kommer själva granskningen med fynd, risker och rekommendationer.
+
+## Kodgranskning utifrån ett work item
+
+Om ni länkar commits och pull requests till work items kan agenten också använda work itemet som startpunkt.
+
+Tanken är då:
+
+1. läsa work itemet och dess relationer
+2. hitta associerade Git-artifacts
+3. filtrera bort abandoned pull requests
+4. fokusera på completed pull requests och direktlänkade commits
+5. granska associerad kod
+6. posta resultatet som kommentar i work itemet
+
+De viktigaste MCP-verktygen för detta är:
+
+- `ado_get_work_item_code_links`
+- `ado_get_pull_request_diff`
+- `ado_get_commit_diff`
+- `ado_add_work_item_comment`
+
+Exempel:
+
+- `Granska associerad kod för work item 35605 och posta resultatet som kommentar i work itemet`
+- `Hitta completed PR:er kopplade till work item 35605, gör en kodgranskning och skriv sammanfattningen i ärendet`
+
+Om ett work item har länkar till abandoned PR:er ignoreras de i det här flödet.
 
 ## Kan AI posta som en annan användare?
 

@@ -100,6 +100,18 @@ Undvik att fylla kommentaren med rena stilåsikter om det inte påverkar korrekt
 
 När granskningen är klar får agenten posta en sammanfattande kommentar i PR:n, men agenten får inte approve:a, decline:a eller på annat sätt ändra PR:ns beslutsläge.
 
+## Regler för kodgranskning via work item
+
+Om användaren ber om kodgranskning utifrån ett work item ska agenten i första hand:
+
+1. läsa work itemets relationer
+2. hitta associerade PR:er och commits
+3. ignorera PR:er med status `abandoned`
+4. fokusera på `completed` PR:er och direkta commit-länkar
+5. posta sammanfattningen som kommentar i work itemet
+
+Om både PR-länkar och commit-länkar finns får agenten använda båda som granskningsunderlag.
+
 ## Skrivstil för kommentarer
 
 Kommentarer ska vara:

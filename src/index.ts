@@ -95,9 +95,19 @@ type PullRequestCommitResponse = {
   comment?: string;
   author?: GitUserDateResponse;
   committer?: GitUserDateResponse;
+  parents?: string[];
   remoteUrl?: string;
   url?: string;
   changeCounts?: Record<string, number>;
+};
+
+type GitCommitResponse = PullRequestCommitResponse & {
+  push?: {
+    pushId?: number;
+    date?: string;
+    pushedBy?: CommentAuthorResponse;
+  };
+  changes?: GitDiffChangeResponse[];
 };
 
 type WiqlResponse = {
@@ -112,7 +122,17 @@ type WorkItemResponse = {
   id: number;
   rev?: number;
   fields?: Record<string, unknown>;
+  relations?: WorkItemRelationResponse[];
   url?: string;
+};
+
+type WorkItemRelationResponse = {
+  rel?: string;
+  url?: string;
+  attributes?: {
+    name?: string;
+    [key: string]: unknown;
+  };
 };
 
 type BuildResponse = {
@@ -183,6 +203,11 @@ type GitCommitDiffsResponse = {
   commonCommit?: string;
   aheadCount?: number;
   behindCount?: number;
+};
+
+type GitCommitChangesResponse = {
+  changeCounts?: Record<string, number>;
+  changes?: GitDiffChangeResponse[];
 };
 
 type GitItemContentMetadataResponse = {
@@ -435,6 +460,45 @@ const tools: Tool[] = [
     },
   },
   {
+    name: "ado_get_commit_diff",
+    description: "Get review-friendly diff text for a specific commit.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        project: {
+          type: "string",
+          description: "Optional project name. Falls back to ADO_DEFAULT_PROJECT.",
+        },
+        repository: {
+          type: "string",
+          description: "Repository name or id.",
+        },
+        commitId: {
+          type: "string",
+          description: "Commit SHA to review.",
+        },
+        top: {
+          type: "number",
+          minimum: 1,
+          maximum: 500,
+          description: "Maximum number of changed items to read before folder filtering.",
+        },
+        maxFiles: {
+          type: "number",
+          minimum: 1,
+          maximum: 100,
+        },
+        maxPatchLines: {
+          type: "number",
+          minimum: 20,
+          maximum: 2000,
+        },
+      },
+      required: ["repository", "commitId"],
+      additionalProperties: false,
+    },
+  },
+  {
     name: "ado_query_wiql",
     description: "Run a read-only WIQL query and return matching work item ids.",
     inputSchema: {
@@ -473,8 +537,36 @@ const tools: Tool[] = [
             type: "string",
           },
         },
+        expand: {
+          type: "string",
+          enum: ["none", "relations", "fields", "links", "all"],
+          description: "Optional work item expand mode. Use 'relations' or 'all' to include linked artifacts.",
+        },
       },
       required: ["ids"],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: "ado_get_work_item_code_links",
+    description: "Resolve associated completed pull requests and direct commits from a work item's linked development artifacts.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        project: {
+          type: "string",
+          description: "Optional project name. Falls back to ADO_DEFAULT_PROJECT.",
+        },
+        workItemId: {
+          type: "number",
+          minimum: 1,
+        },
+        includeActivePullRequests: {
+          type: "boolean",
+          description: "When true, include active PRs in addition to completed PRs. Abandoned PRs are always skipped.",
+        },
+      },
+      required: ["workItemId"],
       additionalProperties: false,
     },
   },
@@ -793,6 +885,136 @@ function isTextReviewableItem(item: GitItemResponse | undefined) {
   return typeof item.content === "string";
 }
 
+function mapWorkItemRelation(relation: WorkItemRelationResponse) {
+  return {
+    rel: relation.rel,
+    name: relation.attributes?.name,
+    url: relation.url,
+    attributes: relation.attributes ?? {},
+  };
+}
+
+function mapWorkItem(workItem: WorkItemResponse, includeRelations = false) {
+  return {
+    id: workItem.id,
+    rev: workItem.rev,
+    url: workItem.url,
+    fields: workItem.fields ?? {},
+    relations: includeRelations ? (workItem.relations ?? []).map(mapWorkItemRelation) : undefined,
+  };
+}
+
+function parseGitArtifactUrl(url: string | undefined) {
+  if (!url) {
+    return undefined;
+  }
+
+  const decoded = decodeURIComponent(url);
+
+  if (decoded.startsWith("vstfs:///Git/PullRequestId/")) {
+    const payload = decoded.slice("vstfs:///Git/PullRequestId/".length).split("/");
+    if (payload.length >= 3) {
+      const pullRequestId = Number(payload[2]);
+      if (Number.isFinite(pullRequestId) && pullRequestId > 0) {
+        return {
+          artifactType: "pullRequest" as const,
+          projectId: payload[0],
+          repositoryId: payload[1],
+          pullRequestId,
+        };
+      }
+    }
+  }
+
+  if (decoded.startsWith("vstfs:///Git/Commit/")) {
+    const payload = decoded.slice("vstfs:///Git/Commit/".length).split("/");
+    if (payload.length >= 3) {
+      return {
+        artifactType: "commit" as const,
+        projectId: payload[0],
+        repositoryId: payload[1],
+        commitId: payload.slice(2).join("/"),
+      };
+    }
+  }
+
+  return undefined;
+}
+
+async function buildReviewDiffFiles(
+  config: ServerConfig,
+  project: string,
+  repository: string,
+  changes: GitDiffChangeResponse[],
+  oldCommitId: string | undefined,
+  newCommitId: string,
+  maxFiles: number,
+  maxPatchLines: number,
+) {
+  const candidateChanges = changes.filter((change) => !change.item?.isFolder).slice(0, maxFiles);
+
+  return Promise.all(
+    candidateChanges.map(async (change) => {
+      const currentPath = change.item?.path;
+      const originalPath = change.originalPath ?? currentPath;
+      const changeType = change.changeType ?? "unknown";
+
+      if (!currentPath && !originalPath) {
+        return {
+          path: null,
+          originalPath: null,
+          changeType,
+          skipped: true,
+          skippedReason: "Changed item saknar path.",
+        };
+      }
+
+      const isAdd = changeType.includes("add");
+      const isDelete = changeType.includes("delete");
+      const shouldReadOld = !isAdd && !!oldCommitId;
+      const shouldReadNew = !isDelete;
+
+      const [oldItem, newItem] = await Promise.all([
+        shouldReadOld && originalPath && oldCommitId
+          ? getGitItemAtCommit(config, project, repository, originalPath, oldCommitId)
+          : Promise.resolve(undefined),
+        shouldReadNew && currentPath ? getGitItemAtCommit(config, project, repository, currentPath, newCommitId) : Promise.resolve(undefined),
+      ]);
+
+      if ((oldItem && !isTextReviewableItem(oldItem)) || (newItem && !isTextReviewableItem(newItem))) {
+        return {
+          path: currentPath ?? originalPath ?? null,
+          originalPath: originalPath ?? null,
+          changeType,
+          skipped: true,
+          skippedReason: "Filen verkar vara binär, bild eller saknar textinnehåll.",
+        };
+      }
+
+      const oldContent = oldItem?.content ?? "";
+      const newContent = newItem?.content ?? "";
+      const patch = createTwoFilesPatch(
+        originalPath ?? currentPath ?? "before",
+        currentPath ?? originalPath ?? "after",
+        oldContent,
+        newContent,
+        oldCommitId ?? "",
+        newCommitId,
+      );
+      const truncatedPatch = truncateLines(patch, maxPatchLines);
+
+      return {
+        path: currentPath ?? originalPath ?? null,
+        originalPath: originalPath ?? null,
+        changeType,
+        skipped: false,
+        patch: truncatedPatch.text,
+        patchTruncated: truncatedPatch.truncated,
+      };
+    }),
+  );
+}
+
 function resolveAuth(config: NodeJS.ProcessEnv): Pick<ServerConfig, "authHeader" | "authMode"> {
   const useDefaultCredentials = config.ADO_USE_DEFAULT_CREDENTIALS?.trim().toLowerCase();
   if (useDefaultCredentials === "true" || useDefaultCredentials === "1" || useDefaultCredentials === "yes") {
@@ -1041,6 +1263,51 @@ async function getGitItemAtCommit(
   );
 }
 
+async function getWorkItem(
+  config: ServerConfig,
+  _project: string,
+  workItemId: number,
+  expand?: string,
+) {
+  return adoRequest<WorkItemResponse>(
+    config,
+    `/_apis/wit/workitems/${workItemId}`,
+    undefined,
+    {
+      "$expand": expand,
+    },
+  );
+}
+
+async function getCommit(
+  config: ServerConfig,
+  project: string,
+  repository: string,
+  commitId: string,
+) {
+  return adoRequest<GitCommitResponse>(
+    config,
+    `/${encodePathSegment(project)}/_apis/git/repositories/${encodePathSegment(repository)}/commits/${encodePathSegment(commitId)}`,
+  );
+}
+
+async function getCommitChanges(
+  config: ServerConfig,
+  project: string,
+  repository: string,
+  commitId: string,
+  top: number,
+) {
+  return adoRequest<GitCommitChangesResponse>(
+    config,
+    `/${encodePathSegment(project)}/_apis/git/repositories/${encodePathSegment(repository)}/commits/${encodePathSegment(commitId)}/changes`,
+    undefined,
+    {
+      top,
+    },
+  );
+}
+
 async function main() {
   const server = new Server(
     {
@@ -1071,6 +1338,7 @@ async function main() {
           pullRequestApprovalEnabled: false,
           pullRequestDeclineEnabled: false,
           pullRequestVoteEnabled: false,
+          workItemCodeReviewLookupEnabled: true,
           workItemFieldWriteEnabled: false,
           baseUrl: config.baseUrl,
           apiVersion: config.apiVersion,
@@ -1258,66 +1526,15 @@ async function main() {
           },
         );
 
-        const candidateChanges = (diffResponse.changes ?? []).filter((change) => !change.item?.isFolder).slice(0, maxFiles);
-        const files = await Promise.all(
-          candidateChanges.map(async (change) => {
-            const currentPath = change.item?.path;
-            const originalPath = change.originalPath ?? currentPath;
-            const changeType = change.changeType ?? "unknown";
-
-            if (!currentPath && !originalPath) {
-              return {
-                path: null,
-                originalPath: null,
-                changeType,
-                skipped: true,
-                skippedReason: "Changed item saknar path.",
-              };
-            }
-
-            const shouldReadOld = !changeType.includes("add");
-            const shouldReadNew = !changeType.includes("delete");
-
-            const [oldItem, newItem] = await Promise.all([
-              shouldReadOld && originalPath
-                ? getGitItemAtCommit(config, resolvedProject, repository, originalPath, targetCommitId)
-                : Promise.resolve(undefined),
-              shouldReadNew && currentPath
-                ? getGitItemAtCommit(config, resolvedProject, repository, currentPath, sourceCommitId)
-                : Promise.resolve(undefined),
-            ]);
-
-            if ((oldItem && !isTextReviewableItem(oldItem)) || (newItem && !isTextReviewableItem(newItem))) {
-              return {
-                path: currentPath ?? originalPath ?? null,
-                originalPath: originalPath ?? null,
-                changeType,
-                skipped: true,
-                skippedReason: "Filen verkar vara binär, bild eller saknar textinnehåll.",
-              };
-            }
-
-            const oldContent = oldItem?.content ?? "";
-            const newContent = newItem?.content ?? "";
-            const patch = createTwoFilesPatch(
-              originalPath ?? currentPath ?? "before",
-              currentPath ?? originalPath ?? "after",
-              oldContent,
-              newContent,
-              targetCommitId,
-              sourceCommitId,
-            );
-            const truncatedPatch = truncateLines(patch, maxPatchLines);
-
-            return {
-              path: currentPath ?? originalPath ?? null,
-              originalPath: originalPath ?? null,
-              changeType,
-              skipped: false,
-              patch: truncatedPatch.text,
-              patchTruncated: truncatedPatch.truncated,
-            };
-          }),
+        const files = await buildReviewDiffFiles(
+          config,
+          resolvedProject,
+          repository,
+          diffResponse.changes ?? [],
+          targetCommitId,
+          sourceCommitId,
+          maxFiles,
+          maxPatchLines,
         );
 
         return toTextResult({
@@ -1413,6 +1630,52 @@ async function main() {
         });
       }
 
+      case "ado_get_commit_diff": {
+        const config = readConfig();
+        const repository = asString(args.repository);
+        const commitId = asString(args.commitId);
+        if (!repository) {
+          throw new Error("repository är obligatorisk.");
+        }
+
+        if (!commitId) {
+          throw new Error("commitId är obligatorisk.");
+        }
+
+        const resolvedProject = ensureProject(asString(args.project), config);
+        const maxFiles = Math.min(asNumber(args.maxFiles) ?? 20, 100);
+        const maxPatchLines = Math.min(asNumber(args.maxPatchLines) ?? 400, 2000);
+        const commit = await getCommit(config, resolvedProject, repository, commitId);
+        const commitChanges = await getCommitChanges(config, resolvedProject, repository, commitId, asNumber(args.top) ?? 200);
+        const parentCommitId = commit.parents?.[0];
+        const files = await buildReviewDiffFiles(
+          config,
+          resolvedProject,
+          repository,
+          commitChanges.changes ?? commit.changes ?? [],
+          parentCommitId,
+          commitId,
+          maxFiles,
+          maxPatchLines,
+        );
+
+        return toTextResult({
+          project: resolvedProject,
+          repository,
+          commit: {
+            commitId: commit.commitId,
+            comment: commit.comment,
+            author: commit.author,
+            committer: commit.committer,
+            parents: commit.parents ?? [],
+            remoteUrl: commit.remoteUrl,
+            url: commit.url,
+            changeCounts: commitChanges.changeCounts ?? commit.changeCounts ?? {},
+          },
+          files,
+        });
+      }
+
       case "ado_query_wiql": {
         const config = readConfig();
         const query = asString(args.query);
@@ -1451,6 +1714,7 @@ async function main() {
         }
 
         const fields = asStringArray(args.fields);
+        const expand = asString(args.expand);
         const response = await adoRequest<CollectionListResponse<WorkItemResponse>>(
           config,
           "/_apis/wit/workitems",
@@ -1458,17 +1722,124 @@ async function main() {
           {
             ids: ids.join(","),
             fields: fields?.join(","),
+            "$expand": expand,
           },
         );
 
         return toTextResult({
           count: response.count ?? response.value?.length ?? 0,
-          workItems: (response.value ?? []).map((workItem) => ({
-            id: workItem.id,
-            rev: workItem.rev,
-            url: workItem.url,
-            fields: workItem.fields ?? {},
+          workItems: (response.value ?? []).map((workItem) => mapWorkItem(workItem, expand === "relations" || expand === "all")),
+        });
+      }
+
+      case "ado_get_work_item_code_links": {
+        const config = readConfig();
+        const workItemId = asNumber(args.workItemId);
+        if (!workItemId || workItemId < 1) {
+          throw new Error("workItemId måste vara ett positivt tal.");
+        }
+
+        const resolvedProject = ensureProject(asString(args.project), config);
+        const workItem = await getWorkItem(config, resolvedProject, workItemId, "relations");
+        const relations = workItem.relations ?? [];
+        const includeActivePullRequests = args.includeActivePullRequests === true;
+
+        const directCommitLinks = new Map<string, { repositoryId: string; projectId: string; commitId: string; relation: WorkItemRelationResponse }>();
+        const pullRequestLinks = new Map<string, { repositoryId: string; projectId: string; pullRequestId: number; relation: WorkItemRelationResponse }>();
+
+        for (const relation of relations) {
+          const parsed = parseGitArtifactUrl(relation.url);
+          if (!parsed) {
+            continue;
+          }
+
+          if (parsed.artifactType === "commit" && parsed.commitId) {
+            directCommitLinks.set(`${parsed.repositoryId}:${parsed.commitId}`, {
+              repositoryId: parsed.repositoryId,
+              projectId: parsed.projectId,
+              commitId: parsed.commitId,
+              relation,
+            });
+          }
+
+          if (parsed.artifactType === "pullRequest") {
+            pullRequestLinks.set(`${parsed.repositoryId}:${parsed.pullRequestId}`, {
+              repositoryId: parsed.repositoryId,
+              projectId: parsed.projectId,
+              pullRequestId: parsed.pullRequestId,
+              relation,
+            });
+          }
+        }
+
+        const pullRequestResults = await Promise.all(
+          [...pullRequestLinks.values()].map(async (link) => {
+            const pullRequest = await getPullRequest(config, resolvedProject, link.repositoryId, link.pullRequestId);
+            const status = (pullRequest.status ?? "").toLowerCase();
+            const include = status === "completed" || (includeActivePullRequests && status === "active");
+            const commitsResponse = include
+              ? await adoRequest<CollectionListResponse<PullRequestCommitResponse> | PullRequestCommitResponse[]>(
+                  config,
+                  `/${encodePathSegment(resolvedProject)}/_apis/git/repositories/${encodePathSegment(link.repositoryId)}/pullRequests/${link.pullRequestId}/commits`,
+                  undefined,
+                  {
+                    "$top": 200,
+                  },
+                )
+              : [];
+            const commits = normalizeCollection(commitsResponse);
+
+            return {
+              include,
+              status,
+              relationName: link.relation.attributes?.name,
+              repositoryId: link.repositoryId,
+              pullRequest: mapPullRequest(pullRequest),
+              commits: commits.map((commit) => ({
+                commitId: commit.commitId,
+                comment: commit.comment,
+                author: commit.author,
+                committer: commit.committer,
+                remoteUrl: commit.remoteUrl,
+                url: commit.url,
+              })),
+            };
+          }),
+        );
+
+        const directCommitResults = await Promise.all(
+          [...directCommitLinks.values()].map(async (link) => {
+            const commit = await getCommit(config, resolvedProject, link.repositoryId, link.commitId);
+            return {
+              relationName: link.relation.attributes?.name,
+              repositoryId: link.repositoryId,
+              commitId: commit.commitId,
+              comment: commit.comment,
+              author: commit.author,
+              committer: commit.committer,
+              parents: commit.parents ?? [],
+              remoteUrl: commit.remoteUrl,
+              url: commit.url,
+            };
+          }),
+        );
+
+        return toTextResult({
+          workItem: mapWorkItem(workItem, true),
+          completedPullRequests: pullRequestResults.filter((item) => item.include).map((item) => ({
+            relationName: item.relationName,
+            repositoryId: item.repositoryId,
+            pullRequest: item.pullRequest,
+            commits: item.commits,
           })),
+          skippedPullRequests: pullRequestResults.filter((item) => !item.include).map((item) => ({
+            relationName: item.relationName,
+            repositoryId: item.repositoryId,
+            pullRequestId: item.pullRequest.id,
+            title: item.pullRequest.title,
+            status: item.status,
+          })),
+          directCommits: directCommitResults,
         });
       }
 
