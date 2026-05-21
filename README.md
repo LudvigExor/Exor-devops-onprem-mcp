@@ -9,11 +9,14 @@ Detta är en fristående MCP-server för att koppla upp AI-agenter till en Devop
 Funktioner:
 - läsa work items
 - posta implementation plans som kommentarer på work items
+- läsa pull requests, commits och diff
+- posta AI-granskning som kommentar i pull requests
 - Läsa repositories/sprintar
 - pull requests
 - builds
 
 - Exempel prompt: "Felsök bugg med ID 12345 och posta lösningsförslag i ärendet"
+- Exempel prompt: "Granska PR 123, leta efter buggar och posta en kodgranskning i PR:n"
 
 Servern fungerar mot **Azure DevOps Server / TFS on-prem** och kan köras med:
 
@@ -169,7 +172,7 @@ examples\copilot-cli-mcp-config.json
 
 Byt ut sökvägen till din lokala klon och fyll i era miljövariabler.
 
-## Kommentarer på work items
+## Kommentarer på work items och pull requests
 
 Servern kan:
 
@@ -177,11 +180,32 @@ Servern kan:
 - skapa kommentarer
 - uppdatera kommentarer
 
-Servern kan inte ändra annan work item-data.
+Servern kan också:
+
+- läsa commits i en pull request
+- läsa diff i en pull request
+- skapa en övergripande AI-kommentar i en pull request
+
+Servern kan inte ändra annan work item-data eller annan PR-data.
 
 Alla kommentarer som skapas via kommentarverktygen får prefixet:
 
 `AI-genererad kommentar:`
+
+För PR-granskningar är standardtiteln:
+
+`Kodgranskning av AI`
+
+## Kodgranskning av pull requests
+
+Tanken är att agenten ska kunna:
+
+1. läsa en pull request
+2. läsa commits och diff
+3. analysera koden för buggar, säkerhetsrisker, onödig kod och ohanterade fel
+4. posta en sammanfattande kommentar i PR:n
+
+I första versionen postas granskningen som en vanlig övergripande PR-kommentar, inte som inline-kommentarer på specifika rader.
 
 ## Kan AI posta som en annan användare?
 

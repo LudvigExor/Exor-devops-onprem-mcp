@@ -6,8 +6,8 @@ Den här mappen innehåller MCP-servern för TFS/Azure DevOps Server.
 
 Som agent ska du använda den här servern för:
 
-- läsning av work items, buggar, repositories, builds och kommentarer
-- skrivning av **endast work item-kommentarer**
+- läsning av work items, buggar, repositories, builds, pull requests, commits, diffar och kommentarer
+- skrivning av **endast work item-kommentarer och pull request-kommentarer**
 
 Du ska **inte** använda den för att ändra annan work item-data.
 
@@ -17,6 +17,7 @@ Pluginen får bara skriva:
 
 - nya kommentarer på work items
 - uppdateringar av work item-kommentarer
+- nya kommentarer på pull requests
 
 Pluginen får inte användas för att ändra:
 
@@ -25,6 +26,10 @@ Pluginen får inte användas för att ändra:
 - fields
 - relationer
 - annan work item-data
+- pull request-status
+- votes
+- reviewers
+- annan pull request-data
 
 ## Konfiguration
 
@@ -71,6 +76,22 @@ Kort sammanfattning av föreslagen lösning eller huvudinriktning.
 ### Mer detaljer
 
 Den utförligare delen som gör att en framtida agent eller utvecklare faktiskt kan lösa ärendet utan att behöva börja om från noll.
+
+## Regler för PR-kodgranskning
+
+När kommentaren gäller en pull request ska titeln normalt vara:
+
+- `Kodgranskning av AI`
+
+Granskningen ska fokusera på:
+
+- buggar
+- säkerhetsrisker
+- ohanterade exceptions
+- onödig eller misstänkt kod
+- viktiga logiska luckor
+
+Undvik att fylla kommentaren med rena stilåsikter om det inte påverkar korrekthet eller underhållbarhet tydligt.
 
 ## Skrivstil för kommentarer
 

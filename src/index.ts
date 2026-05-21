@@ -6,6 +6,7 @@ import {
   type CallToolResult,
   type Tool,
 } from "@modelcontextprotocol/sdk/types.js";
+import { createTwoFilesPatch } from "diff";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 
@@ -48,10 +49,30 @@ type RepositoryResponse = {
 type PullRequestResponse = {
   pullRequestId: number;
   title: string;
+  description?: string;
   status?: string;
+  mergeStatus?: string;
   creationDate?: string;
+  closedDate?: string;
   sourceRefName?: string;
   targetRefName?: string;
+  repository?: {
+    id?: string;
+    name?: string;
+    url?: string;
+  };
+  lastMergeSourceCommit?: {
+    commitId?: string;
+    url?: string;
+  };
+  lastMergeTargetCommit?: {
+    commitId?: string;
+    url?: string;
+  };
+  lastMergeCommit?: {
+    commitId?: string;
+    url?: string;
+  };
   createdBy?: {
     displayName?: string;
     uniqueName?: string;
@@ -60,6 +81,23 @@ type PullRequestResponse = {
     displayName?: string;
     vote?: number;
   }>;
+  url?: string;
+};
+
+type GitUserDateResponse = {
+  name?: string;
+  email?: string;
+  date?: string;
+};
+
+type PullRequestCommitResponse = {
+  commitId?: string;
+  comment?: string;
+  author?: GitUserDateResponse;
+  committer?: GitUserDateResponse;
+  remoteUrl?: string;
+  url?: string;
+  changeCounts?: Record<string, number>;
 };
 
 type WiqlResponse = {
@@ -96,6 +134,8 @@ type BuildResponse = {
 };
 
 const DEFAULT_API_VERSION = "5.1";
+const DEFAULT_PR_REVIEW_TITLE = "Kodgranskning av AI";
+const SERVER_NAME = "azure-devops-onprem";
 
 type CommentAuthorResponse = {
   id?: string;
@@ -120,6 +160,71 @@ type CommentListResponse = {
   totalCount?: number;
   count?: number;
   comments?: CommentResponse[];
+};
+
+type GitDiffItemResponse = {
+  path?: string;
+  isFolder?: boolean;
+  gitObjectType?: string;
+  commitId?: string;
+  url?: string;
+};
+
+type GitDiffChangeResponse = {
+  changeType?: string;
+  originalPath?: string;
+  item?: GitDiffItemResponse;
+};
+
+type GitCommitDiffsResponse = {
+  allChangesIncluded?: boolean;
+  changeCounts?: Record<string, number>;
+  changes?: GitDiffChangeResponse[];
+  commonCommit?: string;
+  aheadCount?: number;
+  behindCount?: number;
+};
+
+type GitItemContentMetadataResponse = {
+  fileName?: string;
+  extension?: string;
+  contentType?: string;
+  encoding?: number;
+  isBinary?: boolean;
+  isImage?: boolean;
+};
+
+type GitItemResponse = {
+  path?: string;
+  content?: string;
+  contentMetadata?: GitItemContentMetadataResponse;
+  gitObjectType?: string;
+  isFolder?: boolean;
+  commitId?: string;
+  objectId?: string;
+};
+
+type PullRequestCommentResponse = {
+  id?: number;
+  parentCommentId?: number;
+  content?: string;
+  publishedDate?: string;
+  lastUpdatedDate?: string;
+  isDeleted?: boolean;
+  commentType?: string | number;
+  author?: CommentAuthorResponse;
+};
+
+type PullRequestThreadResponse = {
+  id?: number;
+  status?: string | number;
+  isDeleted?: boolean;
+  publishedDate?: string;
+  lastUpdatedDate?: string;
+  threadContext?: {
+    filePath?: string;
+  } | null;
+  comments?: PullRequestCommentResponse[];
 };
 
 const tools: Tool[] = [
@@ -180,6 +285,152 @@ const tools: Tool[] = [
         },
       },
       required: ["repository"],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: "ado_get_pull_request",
+    description: "Get a specific pull request with repository and commit metadata.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        project: {
+          type: "string",
+          description: "Optional project name. Falls back to ADO_DEFAULT_PROJECT.",
+        },
+        repository: {
+          type: "string",
+          description: "Repository name or id.",
+        },
+        pullRequestId: {
+          type: "number",
+          minimum: 1,
+        },
+      },
+      required: ["repository", "pullRequestId"],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: "ado_list_pull_request_commits",
+    description: "List commits included in a specific pull request.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        project: {
+          type: "string",
+          description: "Optional project name. Falls back to ADO_DEFAULT_PROJECT.",
+        },
+        repository: {
+          type: "string",
+          description: "Repository name or id.",
+        },
+        pullRequestId: {
+          type: "number",
+          minimum: 1,
+        },
+        top: {
+          type: "number",
+          minimum: 1,
+          maximum: 200,
+        },
+      },
+      required: ["repository", "pullRequestId"],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: "ado_get_pull_request_diff",
+    description: "Get review-friendly diff text for changed files in a pull request.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        project: {
+          type: "string",
+          description: "Optional project name. Falls back to ADO_DEFAULT_PROJECT.",
+        },
+        repository: {
+          type: "string",
+          description: "Repository name or id.",
+        },
+        pullRequestId: {
+          type: "number",
+          minimum: 1,
+        },
+        top: {
+          type: "number",
+          minimum: 1,
+          maximum: 500,
+          description: "Maximum number of changed items to read from Azure DevOps before filtering folders.",
+        },
+        maxFiles: {
+          type: "number",
+          minimum: 1,
+          maximum: 100,
+          description: "Maximum number of files to include in the generated diff output.",
+        },
+        maxPatchLines: {
+          type: "number",
+          minimum: 20,
+          maximum: 2000,
+          description: "Maximum number of diff lines per file before truncation.",
+        },
+      },
+      required: ["repository", "pullRequestId"],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: "ado_list_pull_request_threads",
+    description: "List existing comment threads for a pull request.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        project: {
+          type: "string",
+          description: "Optional project name. Falls back to ADO_DEFAULT_PROJECT.",
+        },
+        repository: {
+          type: "string",
+          description: "Repository name or id.",
+        },
+        pullRequestId: {
+          type: "number",
+          minimum: 1,
+        },
+      },
+      required: ["repository", "pullRequestId"],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: "ado_add_pull_request_comment",
+    description: "Add an AI-formatted summary comment to a pull request.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        project: {
+          type: "string",
+          description: "Optional project name. Falls back to ADO_DEFAULT_PROJECT.",
+        },
+        repository: {
+          type: "string",
+          description: "Repository name or id.",
+        },
+        pullRequestId: {
+          type: "number",
+          minimum: 1,
+        },
+        title: {
+          type: "string",
+          description: "Optional comment title. Defaults to 'Kodgranskning av AI'.",
+        },
+        text: {
+          type: "string",
+          description: "Comment body text.",
+        },
+      },
+      required: ["repository", "pullRequestId", "text"],
       additionalProperties: false,
     },
   },
@@ -442,12 +693,104 @@ function mapComment(comment: CommentResponse) {
   };
 }
 
+function mapPullRequest(pullRequest: PullRequestResponse) {
+  return {
+    id: pullRequest.pullRequestId,
+    title: pullRequest.title,
+    description: pullRequest.description,
+    status: pullRequest.status,
+    mergeStatus: pullRequest.mergeStatus,
+    creationDate: pullRequest.creationDate,
+    closedDate: pullRequest.closedDate,
+    sourceRefName: pullRequest.sourceRefName,
+    targetRefName: pullRequest.targetRefName,
+    createdBy: pullRequest.createdBy?.displayName ?? pullRequest.createdBy?.uniqueName,
+    repository: {
+      id: pullRequest.repository?.id,
+      name: pullRequest.repository?.name,
+    },
+    lastMergeSourceCommitId: pullRequest.lastMergeSourceCommit?.commitId,
+    lastMergeTargetCommitId: pullRequest.lastMergeTargetCommit?.commitId,
+    lastMergeCommitId: pullRequest.lastMergeCommit?.commitId,
+    reviewers: (pullRequest.reviewers ?? []).map((reviewer) => ({
+      name: reviewer.displayName,
+      vote: reviewer.vote,
+    })),
+    url: pullRequest.url,
+  };
+}
+
+function mapPullRequestComment(comment: PullRequestCommentResponse) {
+  return {
+    id: comment.id,
+    parentCommentId: comment.parentCommentId,
+    content: comment.content,
+    publishedDate: comment.publishedDate,
+    lastUpdatedDate: comment.lastUpdatedDate,
+    isDeleted: comment.isDeleted ?? false,
+    author: comment.author?.displayName ?? comment.author?.uniqueName,
+    commentType: comment.commentType,
+  };
+}
+
+function mapPullRequestThread(thread: PullRequestThreadResponse) {
+  return {
+    id: thread.id,
+    status: thread.status,
+    isDeleted: thread.isDeleted ?? false,
+    publishedDate: thread.publishedDate,
+    lastUpdatedDate: thread.lastUpdatedDate,
+    filePath: thread.threadContext?.filePath ?? null,
+    comments: (thread.comments ?? []).map(mapPullRequestComment),
+  };
+}
+
 function truncate(value: string, maxLength = 800): string {
   if (value.length <= maxLength) {
     return value;
   }
 
   return `${value.slice(0, maxLength)}...`;
+}
+
+function truncateLines(value: string, maxLines: number, maxChars = 30000) {
+  const normalized = value.replace(/\r\n/g, "\n");
+  const lines = normalized.split("\n");
+
+  if (lines.length > maxLines) {
+    return {
+      text: `${lines.slice(0, maxLines).join("\n")}\n... [diff truncated after ${maxLines} lines]`,
+      truncated: true,
+    };
+  }
+
+  if (normalized.length > maxChars) {
+    return {
+      text: `${normalized.slice(0, maxChars)}\n... [diff truncated after ${maxChars} characters]`,
+      truncated: true,
+    };
+  }
+
+  return {
+    text: normalized,
+    truncated: false,
+  };
+}
+
+function normalizeCollection<T>(response: CollectionListResponse<T> | T[]): T[] {
+  return Array.isArray(response) ? response : (response.value ?? []);
+}
+
+function isTextReviewableItem(item: GitItemResponse | undefined) {
+  if (!item || item.isFolder) {
+    return false;
+  }
+
+  if (item.contentMetadata?.isBinary || item.contentMetadata?.isImage) {
+    return false;
+  }
+
+  return typeof item.content === "string";
 }
 
 function resolveAuth(config: NodeJS.ProcessEnv): Pick<ServerConfig, "authHeader" | "authMode"> {
@@ -664,10 +1007,44 @@ function asStringArray(value: unknown): string[] | undefined {
   return values.length > 0 ? values : [];
 }
 
+async function getPullRequest(
+  config: ServerConfig,
+  project: string,
+  repository: string,
+  pullRequestId: number,
+) {
+  return adoRequest<PullRequestResponse>(
+    config,
+    `/${encodePathSegment(project)}/_apis/git/repositories/${encodePathSegment(repository)}/pullRequests/${pullRequestId}`,
+  );
+}
+
+async function getGitItemAtCommit(
+  config: ServerConfig,
+  project: string,
+  repository: string,
+  path: string,
+  commitId: string,
+) {
+  return adoRequest<GitItemResponse>(
+    config,
+    `/${encodePathSegment(project)}/_apis/git/repositories/${encodePathSegment(repository)}/items`,
+    undefined,
+    {
+      path,
+      includeContent: "true",
+      includeContentMetadata: "true",
+      "$format": "json",
+      "versionDescriptor.version": commitId,
+      "versionDescriptor.versionType": "commit",
+    },
+  );
+}
+
 async function main() {
   const server = new Server(
     {
-      name: "taxibokning-azure-devops-onprem",
+      name: SERVER_NAME,
       version: "0.1.0",
     },
     {
@@ -687,9 +1064,10 @@ async function main() {
         const config = readConfig();
 
         return toTextResult({
-          server: "taxibokning-azure-devops-onprem",
+          server: SERVER_NAME,
           readonly: false,
           commentWriteEnabled: true,
+          pullRequestCommentWriteEnabled: true,
           workItemFieldWriteEnabled: false,
           baseUrl: config.baseUrl,
           apiVersion: config.apiVersion,
@@ -775,6 +1153,260 @@ async function main() {
               vote: reviewer.vote,
             })),
           })),
+        });
+      }
+
+      case "ado_get_pull_request": {
+        const config = readConfig();
+        const repository = asString(args.repository);
+        const pullRequestId = asNumber(args.pullRequestId);
+        if (!repository) {
+          throw new Error("repository är obligatorisk.");
+        }
+
+        if (!pullRequestId || pullRequestId < 1) {
+          throw new Error("pullRequestId måste vara ett positivt tal.");
+        }
+
+        const resolvedProject = ensureProject(asString(args.project), config);
+        const pullRequest = await getPullRequest(config, resolvedProject, repository, pullRequestId);
+
+        return toTextResult({
+          project: resolvedProject,
+          repository,
+          pullRequest: mapPullRequest(pullRequest),
+        });
+      }
+
+      case "ado_list_pull_request_commits": {
+        const config = readConfig();
+        const repository = asString(args.repository);
+        const pullRequestId = asNumber(args.pullRequestId);
+        if (!repository) {
+          throw new Error("repository är obligatorisk.");
+        }
+
+        if (!pullRequestId || pullRequestId < 1) {
+          throw new Error("pullRequestId måste vara ett positivt tal.");
+        }
+
+        const resolvedProject = ensureProject(asString(args.project), config);
+        const response = await adoRequest<CollectionListResponse<PullRequestCommitResponse> | PullRequestCommitResponse[]>(
+          config,
+          `/${encodePathSegment(resolvedProject)}/_apis/git/repositories/${encodePathSegment(repository)}/pullRequests/${pullRequestId}/commits`,
+          undefined,
+          {
+            "$top": asNumber(args.top) ?? 100,
+          },
+        );
+        const commits = normalizeCollection(response);
+
+        return toTextResult({
+          project: resolvedProject,
+          repository,
+          pullRequestId,
+          count: commits.length,
+          commits: commits.map((commit) => ({
+            commitId: commit.commitId,
+            comment: commit.comment,
+            author: commit.author,
+            committer: commit.committer,
+            changeCounts: commit.changeCounts ?? {},
+            remoteUrl: commit.remoteUrl,
+            url: commit.url,
+          })),
+        });
+      }
+
+      case "ado_get_pull_request_diff": {
+        const config = readConfig();
+        const repository = asString(args.repository);
+        const pullRequestId = asNumber(args.pullRequestId);
+        if (!repository) {
+          throw new Error("repository är obligatorisk.");
+        }
+
+        if (!pullRequestId || pullRequestId < 1) {
+          throw new Error("pullRequestId måste vara ett positivt tal.");
+        }
+
+        const resolvedProject = ensureProject(asString(args.project), config);
+        const maxFiles = Math.min(asNumber(args.maxFiles) ?? 20, 100);
+        const maxPatchLines = Math.min(asNumber(args.maxPatchLines) ?? 400, 2000);
+        const pullRequest = await getPullRequest(config, resolvedProject, repository, pullRequestId);
+        const sourceCommitId = pullRequest.lastMergeSourceCommit?.commitId;
+        const targetCommitId = pullRequest.lastMergeTargetCommit?.commitId;
+
+        if (!sourceCommitId || !targetCommitId) {
+          throw new Error("Pull request saknar commit-information för diff. lastMergeSourceCommit och lastMergeTargetCommit krävs.");
+        }
+
+        const diffResponse = await adoRequest<GitCommitDiffsResponse>(
+          config,
+          `/${encodePathSegment(resolvedProject)}/_apis/git/repositories/${encodePathSegment(repository)}/diffs/commits`,
+          undefined,
+          {
+            "$top": asNumber(args.top) ?? 200,
+            diffCommonCommit: "false",
+            baseVersion: targetCommitId,
+            baseVersionType: "commit",
+            targetVersion: sourceCommitId,
+            targetVersionType: "commit",
+          },
+        );
+
+        const candidateChanges = (diffResponse.changes ?? []).filter((change) => !change.item?.isFolder).slice(0, maxFiles);
+        const files = await Promise.all(
+          candidateChanges.map(async (change) => {
+            const currentPath = change.item?.path;
+            const originalPath = change.originalPath ?? currentPath;
+            const changeType = change.changeType ?? "unknown";
+
+            if (!currentPath && !originalPath) {
+              return {
+                path: null,
+                originalPath: null,
+                changeType,
+                skipped: true,
+                skippedReason: "Changed item saknar path.",
+              };
+            }
+
+            const shouldReadOld = !changeType.includes("add");
+            const shouldReadNew = !changeType.includes("delete");
+
+            const [oldItem, newItem] = await Promise.all([
+              shouldReadOld && originalPath
+                ? getGitItemAtCommit(config, resolvedProject, repository, originalPath, targetCommitId)
+                : Promise.resolve(undefined),
+              shouldReadNew && currentPath
+                ? getGitItemAtCommit(config, resolvedProject, repository, currentPath, sourceCommitId)
+                : Promise.resolve(undefined),
+            ]);
+
+            if ((oldItem && !isTextReviewableItem(oldItem)) || (newItem && !isTextReviewableItem(newItem))) {
+              return {
+                path: currentPath ?? originalPath ?? null,
+                originalPath: originalPath ?? null,
+                changeType,
+                skipped: true,
+                skippedReason: "Filen verkar vara binär, bild eller saknar textinnehåll.",
+              };
+            }
+
+            const oldContent = oldItem?.content ?? "";
+            const newContent = newItem?.content ?? "";
+            const patch = createTwoFilesPatch(
+              originalPath ?? currentPath ?? "before",
+              currentPath ?? originalPath ?? "after",
+              oldContent,
+              newContent,
+              targetCommitId,
+              sourceCommitId,
+            );
+            const truncatedPatch = truncateLines(patch, maxPatchLines);
+
+            return {
+              path: currentPath ?? originalPath ?? null,
+              originalPath: originalPath ?? null,
+              changeType,
+              skipped: false,
+              patch: truncatedPatch.text,
+              patchTruncated: truncatedPatch.truncated,
+            };
+          }),
+        );
+
+        return toTextResult({
+          project: resolvedProject,
+          repository,
+          pullRequestId,
+          title: pullRequest.title,
+          sourceCommitId,
+          targetCommitId,
+          diffSummary: {
+            allChangesIncluded: diffResponse.allChangesIncluded ?? false,
+            changeCounts: diffResponse.changeCounts ?? {},
+            commonCommit: diffResponse.commonCommit,
+            aheadCount: diffResponse.aheadCount,
+            behindCount: diffResponse.behindCount,
+          },
+          includedFileCount: files.length,
+          files,
+        });
+      }
+
+      case "ado_list_pull_request_threads": {
+        const config = readConfig();
+        const repository = asString(args.repository);
+        const pullRequestId = asNumber(args.pullRequestId);
+        if (!repository) {
+          throw new Error("repository är obligatorisk.");
+        }
+
+        if (!pullRequestId || pullRequestId < 1) {
+          throw new Error("pullRequestId måste vara ett positivt tal.");
+        }
+
+        const resolvedProject = ensureProject(asString(args.project), config);
+        const response = await adoRequest<CollectionListResponse<PullRequestThreadResponse> | PullRequestThreadResponse[]>(
+          config,
+          `/${encodePathSegment(resolvedProject)}/_apis/git/repositories/${encodePathSegment(repository)}/pullRequests/${pullRequestId}/threads`,
+        );
+        const threads = normalizeCollection(response);
+
+        return toTextResult({
+          project: resolvedProject,
+          repository,
+          pullRequestId,
+          count: threads.length,
+          threads: threads.map(mapPullRequestThread),
+        });
+      }
+
+      case "ado_add_pull_request_comment": {
+        const config = readConfig();
+        const repository = asString(args.repository);
+        const pullRequestId = asNumber(args.pullRequestId);
+        const title = asString(args.title) ?? DEFAULT_PR_REVIEW_TITLE;
+        const text = asString(args.text);
+        if (!repository) {
+          throw new Error("repository är obligatorisk.");
+        }
+
+        if (!pullRequestId || pullRequestId < 1) {
+          throw new Error("pullRequestId måste vara ett positivt tal.");
+        }
+
+        if (!text) {
+          throw new Error("text är obligatorisk.");
+        }
+
+        const resolvedProject = ensureProject(asString(args.project), config);
+        const response = await adoRequest<PullRequestThreadResponse>(
+          config,
+          `/${encodePathSegment(resolvedProject)}/_apis/git/repositories/${encodePathSegment(repository)}/pullRequests/${pullRequestId}/threads`,
+          {
+            method: "POST",
+            body: JSON.stringify({
+              comments: [
+                {
+                  parentCommentId: 0,
+                  content: formatAiGeneratedComment(title, text),
+                  commentType: 1,
+                },
+              ],
+              status: 1,
+            }),
+          },
+        );
+
+        return toTextResult({
+          action: "created",
+          project: resolvedProject,
+          repository,
+          pullRequestId,
+          thread: mapPullRequestThread(response),
         });
       }
 
