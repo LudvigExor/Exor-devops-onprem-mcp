@@ -19,6 +19,8 @@ Pluginen får bara skriva:
 - uppdateringar av work item-kommentarer
 - nya kommentarer på pull requests
 
+För pull requests gäller uttryckligen att pluginen bara får **posta kommentarer**.
+
 Pluginen får inte användas för att ändra:
 
 - titel
@@ -30,6 +32,9 @@ Pluginen får inte användas för att ändra:
 - votes
 - reviewers
 - annan pull request-data
+- approve
+- decline
+- merge
 
 ## Konfiguration
 
@@ -92,6 +97,8 @@ Granskningen ska fokusera på:
 - viktiga logiska luckor
 
 Undvik att fylla kommentaren med rena stilåsikter om det inte påverkar korrekthet eller underhållbarhet tydligt.
+
+När granskningen är klar får agenten posta en sammanfattande kommentar i PR:n, men agenten får inte approve:a, decline:a eller på annat sätt ändra PR:ns beslutsläge.
 
 ## Skrivstil för kommentarer
 

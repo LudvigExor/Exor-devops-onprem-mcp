@@ -188,6 +188,14 @@ Servern kan också:
 
 Servern kan inte ändra annan work item-data eller annan PR-data.
 
+Det betyder uttryckligen att pluginen **inte** får:
+
+- approve:a en pull request
+- decline:a en pull request
+- sätta vote
+- ändra reviewers
+- merge:a eller på annat sätt ändra PR-status
+
 Alla kommentarer som skapas via kommentarverktygen får prefixet:
 
 `AI-genererad kommentar:`
