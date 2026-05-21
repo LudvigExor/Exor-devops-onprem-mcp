@@ -124,6 +124,10 @@ Kommentarer ska vara:
 - lätta att skumma
 - tillräckligt informativa för att senare kunna användas som underlag för implementation
 
+Om texten är på svenska ska agenten skriva korrekt svenska och bevara svenska tecken som `å`, `ä` och `ö`.
+
+Använd inte ASCII-ersättningar som `a`, `ae` eller `oe` om det inte finns ett mycket tydligt tekniskt skäl.
+
 Bra tumregel:
 
 1. börja med reproduktion om den är känd
