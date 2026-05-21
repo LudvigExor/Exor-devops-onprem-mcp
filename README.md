@@ -176,6 +176,8 @@ Granskningen fokuserar på:
 - brister i felhantering
 - onödig eller misstänkt kod
 
+Om PR:n har relaterade work items tar granskningen också hänsyn till titel, beskrivning och annan relevant work item-kontekst för att bedöma om ändringen faktiskt verkar uppfylla syftet i ärendet.
+
 Pluginet kan också uppdatera en tidigare AI-kommentar i PR:n i stället för att alltid skapa en ny.
 
 ## Kodgranskning från work item

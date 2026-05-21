@@ -98,6 +98,8 @@ Granskningen ska fokusera på:
 - onödig eller misstänkt kod
 - viktiga logiska luckor
 
+Om pull requesten har relaterade work items ska agenten också läsa in relevant work item-kontekst och väga in om ändringen faktiskt verkar lösa ärendets syfte, beskrivning och eventuella acceptanskriterier.
+
 Undvik att fylla kommentaren med rena stilåsikter om det inte påverkar korrekthet eller underhållbarhet tydligt.
 
 När granskningen är klar får agenten posta en sammanfattande kommentar i PR:n, men agenten får inte approve:a, decline:a eller på annat sätt ändra PR:ns beslutsläge.

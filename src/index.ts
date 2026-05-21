@@ -152,6 +152,11 @@ type WiqlResponse = {
   workItems?: Array<{ id: number; url?: string }>;
 };
 
+type PullRequestWorkItemRefResponse = {
+  id?: number;
+  url?: string;
+};
+
 type WorkItemResponse = {
   id: number;
   rev?: number;
@@ -356,6 +361,29 @@ const tools: Tool[] = [
   {
     name: "ado_get_pull_request",
     description: "Get a specific pull request with repository and commit metadata.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        project: {
+          type: "string",
+          description: "Optional project name. Falls back to ADO_DEFAULT_PROJECT.",
+        },
+        repository: {
+          type: "string",
+          description: "Repository name or id.",
+        },
+        pullRequestId: {
+          type: "number",
+          minimum: 1,
+        },
+      },
+      required: ["repository", "pullRequestId"],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: "ado_get_pull_request_work_items",
+    description: "Get work items linked to a pull request, including title/description context for code review.",
     inputSchema: {
       type: "object",
       properties: {
@@ -889,6 +917,41 @@ function mapPullRequest(pullRequest: PullRequestResponse) {
       vote: reviewer.vote,
     })),
     url: pullRequest.url,
+  };
+}
+
+function getWorkItemStringField(workItem: WorkItemResponse, fieldName: string) {
+  const value = workItem.fields?.[fieldName];
+  return typeof value === "string" && value.trim().length > 0 ? value.trim() : undefined;
+}
+
+function sanitizeWorkItemText(value: string | undefined, maxLength = 1200) {
+  if (!value) {
+    return undefined;
+  }
+
+  const normalized = value
+    .replace(/<[^>]+>/g, " ")
+    .replace(/&nbsp;/gi, " ")
+    .replace(/&amp;/gi, "&")
+    .replace(/&lt;/gi, "<")
+    .replace(/&gt;/gi, ">")
+    .replace(/\s+/g, " ")
+    .trim();
+
+  return normalized.length > maxLength ? `${normalized.slice(0, maxLength)}...` : normalized;
+}
+
+function summarizePullRequestWorkItem(workItem: WorkItemResponse): PullRequestRelatedWorkItemSummary {
+  return {
+    id: workItem.id,
+    title: getWorkItemStringField(workItem, "System.Title"),
+    state: getWorkItemStringField(workItem, "System.State"),
+    type: getWorkItemStringField(workItem, "System.WorkItemType"),
+    assignedTo: getWorkItemStringField(workItem, "System.AssignedTo"),
+    description: sanitizeWorkItemText(getWorkItemStringField(workItem, "System.Description")),
+    acceptanceCriteria: sanitizeWorkItemText(getWorkItemStringField(workItem, "Microsoft.VSTS.Common.AcceptanceCriteria")),
+    reproductionSteps: sanitizeWorkItemText(getWorkItemStringField(workItem, "Microsoft.VSTS.TCM.ReproSteps")),
   };
 }
 
@@ -1448,6 +1511,46 @@ async function getCommitChanges(
   );
 }
 
+async function listPullRequestWorkItems(
+  config: ServerConfig,
+  project: string,
+  repository: string,
+  pullRequestId: number,
+) {
+  const refsResponse = await adoRequest<CollectionListResponse<PullRequestWorkItemRefResponse> | PullRequestWorkItemRefResponse[]>(
+    config,
+    `/${encodePathSegment(project)}/_apis/git/repositories/${encodePathSegment(repository)}/pullRequests/${pullRequestId}/workitems`,
+  );
+  const workItemRefs = normalizeCollection(refsResponse);
+  const ids = workItemRefs
+    .map((workItem) => workItem.id)
+    .filter((id): id is number => typeof id === "number" && Number.isFinite(id));
+
+  if (ids.length === 0) {
+    return [];
+  }
+
+  const workItemsResponse = await adoRequest<CollectionListResponse<WorkItemResponse>>(
+    config,
+    "/_apis/wit/workitems",
+    undefined,
+    {
+      ids: ids.join(","),
+      fields: [
+        "System.Title",
+        "System.State",
+        "System.WorkItemType",
+        "System.AssignedTo",
+        "System.Description",
+        "Microsoft.VSTS.Common.AcceptanceCriteria",
+        "Microsoft.VSTS.TCM.ReproSteps",
+      ].join(","),
+    },
+  );
+
+  return (workItemsResponse.value ?? []).map(summarizePullRequestWorkItem);
+}
+
 async function listPullRequests(
   config: ServerConfig,
   project: string,
@@ -1877,6 +1980,17 @@ type AutoReviewStateFile = {
   pullRequests?: Record<string, PullRequestReviewState>;
 };
 
+type PullRequestRelatedWorkItemSummary = {
+  id: number;
+  title?: string;
+  state?: string;
+  type?: string;
+  assignedTo?: string;
+  description?: string;
+  acceptanceCriteria?: string;
+  reproductionSteps?: string;
+};
+
 function getAutoReviewStatePath(repoRoot: string) {
   return path.join(repoRoot, ".git", "ado-auto-review-state.json");
 }
@@ -1903,6 +2017,7 @@ function buildPullRequestReviewPrompt(params: {
   repository: string;
   pullRequest: ReturnType<typeof mapPullRequest>;
   diff: Awaited<ReturnType<typeof getPullRequestDiffResult>>;
+  relatedWorkItems: PullRequestRelatedWorkItemSummary[];
 }) {
   const fileSections = params.diff.files
     .map((file) => {
@@ -1910,10 +2025,28 @@ function buildPullRequestReviewPrompt(params: {
       return `Fil: ${file.path ?? file.originalPath ?? "(okänd)"}\nÄndring: ${file.changeType}\nPatch:\n${patch}`;
     })
     .join("\n\n---\n\n");
+  const workItemSection =
+    params.relatedWorkItems.length === 0
+      ? "Inga relaterade work items hittades."
+      : params.relatedWorkItems
+          .map((workItem) =>
+            [
+              `Work item #${workItem.id}${workItem.type ? ` (${workItem.type})` : ""}`,
+              workItem.title ? `Titel: ${workItem.title}` : undefined,
+              workItem.state ? `Status: ${workItem.state}` : undefined,
+              workItem.description ? `Beskrivning: ${workItem.description}` : undefined,
+              workItem.acceptanceCriteria ? `Acceptanskriterier: ${workItem.acceptanceCriteria}` : undefined,
+              workItem.reproductionSteps ? `Repro/övrig kontext: ${workItem.reproductionSteps}` : undefined,
+            ]
+              .filter((value): value is string => typeof value === "string" && value.length > 0)
+              .join("\n"),
+          )
+          .join("\n\n---\n\n");
 
   return [
     "Gör en kortfattad men konkret kodgranskning på svenska av denna pull request.",
     "Fokusera på buggar, logiska fel, säkerhetsrisker, ohanterade exceptions, brister i validering och onödig eller misstänkt kod.",
+    "Väg också in relaterade work items: om ändringen verkar lösa syftet i ärendet, om något viktigt saknas, eller om implementationen verkar gå emot kravet.",
     "Undvik stilkommentarer om de inte påverkar korrekthet tydligt.",
     "Skriv bara själva granskningsinnehållet utan prefixet 'AI-genererad kommentar:' och utan titeln.",
     "",
@@ -1927,6 +2060,9 @@ function buildPullRequestReviewPrompt(params: {
     "",
     "Diffsammanfattning:",
     JSON.stringify(params.diff.diffSummary, null, 2),
+    "",
+    "Relaterade work items:",
+    workItemSection,
     "",
     "Ändrade filer:",
     fileSections,
@@ -2121,12 +2257,19 @@ async function runAutoReviewTrigger(argv: string[]) {
     selectedPullRequest.pullRequestId,
     { maxFiles: 20, maxPatchLines: 500 },
   );
+  const relatedWorkItems = await listPullRequestWorkItems(
+    config,
+    project,
+    repository.id ?? repository.name ?? "",
+    selectedPullRequest.pullRequestId,
+  );
 
   const prompt = buildPullRequestReviewPrompt({
     project,
     repository: repository.name ?? repository.id ?? "",
     pullRequest: mapPullRequest(diff.pullRequest),
     diff,
+    relatedWorkItems,
   });
   const reviewText = await runConfiguredReviewCommand(settings.automaticCodeReviewPRCommand, prompt, repoRoot);
 
@@ -2316,11 +2459,37 @@ async function main() {
 
         const resolvedProject = ensureProject(asString(args.project), config);
         const pullRequest = await getPullRequest(config, resolvedProject, repository, pullRequestId);
+        const relatedWorkItems = await listPullRequestWorkItems(config, resolvedProject, repository, pullRequestId);
 
         return toTextResult({
           project: resolvedProject,
           repository,
           pullRequest: mapPullRequest(pullRequest),
+          relatedWorkItems,
+        });
+      }
+
+      case "ado_get_pull_request_work_items": {
+        const config = readConfig();
+        const repository = asString(args.repository);
+        const pullRequestId = asNumber(args.pullRequestId);
+        if (!repository) {
+          throw new Error("repository är obligatorisk.");
+        }
+
+        if (!pullRequestId || pullRequestId < 1) {
+          throw new Error("pullRequestId måste vara ett positivt tal.");
+        }
+
+        const resolvedProject = ensureProject(asString(args.project), config);
+        const relatedWorkItems = await listPullRequestWorkItems(config, resolvedProject, repository, pullRequestId);
+
+        return toTextResult({
+          project: resolvedProject,
+          repository,
+          pullRequestId,
+          count: relatedWorkItems.length,
+          workItems: relatedWorkItems,
         });
       }
 
