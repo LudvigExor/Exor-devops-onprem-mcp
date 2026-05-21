@@ -36,6 +36,17 @@ npm install
 
 Detta är normalt ett engångssteg. Kör det igen om `package.json` eller `package-lock.json` ändras.
 
+## Uppdatera pluginet
+
+Om du redan har pluginet lokalt och en ny version har pushats till GitHub, uppdatera din lokala klon i repo-roten:
+
+```powershell
+git pull
+npm install
+```
+
+`npm install` behövs främst när beroenden har ändrats. Om bara koden har ändrats räcker ofta `git pull`.
+
 ## Normal användning
 
 Servern startas normalt **automatiskt** av MCP-klienten via `.mcp.json` eller `mcp-config.json`.
