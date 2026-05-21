@@ -23,7 +23,7 @@ Servern får **inte**:
 
 1. **Windows**
 2. **Node.js 20+**
-3. Nätverksåtkomst till Azure DevOps Server / TFS
+3. Nätverksåtkomst till Azure DevOps Server / TFS (VPN måste vara igång om du jobbar remote)
 4. Ett konto som har rättigheter i den miljö du ansluter mot
 
 ## Installation
@@ -67,7 +67,7 @@ Servern läser sin anslutning från miljövariabler:
 - `ADO_DEFAULT_PROJECT`
 - `ADO_API_VERSION`
 - `ADO_COMMENTS_API_VERSION`
-- `ADO_USE_DEFAULT_CREDENTIALS`
+- `ADO_USE_DEFAULT_CREDENTIALS` --true för ditt windows inlogg
 - `ADO_PAT`
 - `ADO_BASIC_USERNAME`
 - `ADO_BASIC_PASSWORD`
@@ -75,7 +75,7 @@ Servern läser sin anslutning från miljövariabler:
 
 Vanligt minimum är:
 
-- `ADO_BASE_URL`
+- `ADO_BASE_URL` - URL till devops
 - någon form av autentisering
 
 ## Visual Studio 2022
@@ -114,15 +114,15 @@ Exempel:
 
 Använd en separat `.mcp.json` i varje repo om olika projekt ska koppla mot olika collections eller defaultprojekt.
 
-## GitHub Copilot CLI
+## GitHub Copilot CLI, Codex eller Claude
 
-För Copilot CLI lägger du en lokal konfig här:
+Lägg lokal konfig här:
 
 ```text
-C:\Users\<DITT_ANVÄNDARNAMN>\.copilot\mcp-config.json
+C:\Users\<DITT_ANVÄNDARNAMN>\.copilot\mcp-config.json (eller mapp .codex, .claude osv beroende på vilken du vill använda)
 ```
 
-Exempel finns i:
+Exempel finns i detta repo under:
 
 ```text
 examples\copilot-cli-mcp-config.json
@@ -130,19 +130,14 @@ examples\copilot-cli-mcp-config.json
 
 ## Kommentarformat
 
-Alla kommentarer som skapas via pluginen börjar med:
+Alla kommentarer som skapas via pluginen börjar med. Kommentarer kan skapas i work items eller i PR:
 
 `AI-genererad kommentar:`
 
-Sedan kommer alltid en tom rad innan titel och innehåll.
-
-För PR-kodgranskning används normalt titeln:
-
-`Kodgranskning av AI`
 
 ## Kodgranskning i PR
 
-Du kan be agenten granska en PR och posta resultatet i PR:n.
+Du kan be agenten kodgranska en PR och posta resultatet i PR:n.
 
 Exempel:
 
