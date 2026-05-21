@@ -35,7 +35,7 @@ npm install
 npm run build
 ```
 
-Vid uppdatering:
+Vid uppdatering - i pluginets sökväg kör du:
 
 ```powershell
 git pull
@@ -43,13 +43,13 @@ npm install
 npm run build
 ```
 
-## Snabbaste vägen
+## Kom igång
 
 Det enklaste är oftast att:
 
-1. kopiera `examples\repo-root.mcp.json` till målrepoets `.mcp.json`
-2. ändra sökvägen till din plugin-mapp
-3. ändra `ADO_BASE_URL` och eventuellt `ADO_DEFAULT_PROJECT`
+1. kopiera `examples\.mcp.json` till projektets root - måste heta `.mcp.json`
+2. ändra sökvägen i .mcp.json-filen till din mapp där pluginet lagrats
+3. ändra `ADO_BASE_URL` och eventuellt `ADO_DEFAULT_PROJECT` (till devops on prem URL och projectname i devops)
 
 Om du vill använda **(experimental)** automatisk PR-granskning kan du också kopiera:
 
@@ -57,10 +57,10 @@ Om du vill använda **(experimental)** automatisk PR-granskning kan du också ko
 examples\copilot-cli-mcp-config.json
 ```
 
-till din lokala klientmapp, till exempel:
+till din lokala klientmapp, till exempel (lägg även i mapparna .claude, .codex, .cursor beroende på vilka du vill använda pluginen i):
 
 ```text
-C:\Users\<du>\.copilot\mcp-config.json
+C:\Users\<din user>\.copilot\mcp-config.json
 ```
 
 ## Setup i ett projekt (valfritt)
