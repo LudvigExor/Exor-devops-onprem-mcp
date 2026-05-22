@@ -8,7 +8,7 @@ import {
 } from "@modelcontextprotocol/sdk/types.js";
 import { createTwoFilesPatch } from "diff";
 import { execFile } from "node:child_process";
-import { existsSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { chmod, mkdir, readFile, rm, stat, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
@@ -829,7 +829,16 @@ function escapeMarkdownInline(value: string): string {
   return value.replace(/([\\`*_{}\[\]()#+\-.!|>])/g, "\\$1");
 }
 
-function formatAiGeneratedComment(title: string, text: string): string {
+function escapeHtml(value: string): string {
+  return value
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&#39;");
+}
+
+function normalizeAiCommentParts(title: string, text: string) {
   const trimmedTitle = title.trim();
   const normalizedText = text.replace(/\r\n/g, "\n").trim();
 
@@ -841,7 +850,21 @@ function formatAiGeneratedComment(title: string, text: string): string {
     throw new Error("text är obligatorisk.");
   }
 
+  return {
+    trimmedTitle,
+    normalizedText,
+  };
+}
+
+function formatAiGeneratedPullRequestComment(title: string, text: string): string {
+  const { trimmedTitle, normalizedText } = normalizeAiCommentParts(title, text);
   return `*${escapeMarkdownInline(AI_COMMENT_PREFIX)}*\n\n### ${escapeMarkdownInline(trimmedTitle)}\n\n${normalizedText}`;
+}
+
+function formatAiGeneratedWorkItemComment(title: string, text: string): string {
+  const { trimmedTitle, normalizedText } = normalizeAiCommentParts(title, text);
+  const htmlBody = escapeHtml(normalizedText).replace(/\n/g, "<br />\n");
+  return `<p><i>${escapeHtml(AI_COMMENT_PREFIX)}</i></p>\n<h3>${escapeHtml(trimmedTitle)}</h3>\n<p>${htmlBody}</p>`;
 }
 
 function mapComment(comment: CommentResponse) {
@@ -856,6 +879,20 @@ function mapComment(comment: CommentResponse) {
     createdBy: comment.createdBy?.displayName ?? comment.createdBy?.uniqueName,
     modifiedBy: comment.modifiedBy?.displayName ?? comment.modifiedBy?.uniqueName,
   };
+}
+
+function commentStartsWithAiGeneratedPrefix(value: string | undefined) {
+  if (!value) {
+    return false;
+  }
+
+  const normalized = value
+    .trimStart()
+    .replace(/<[^>]+>/g, "")
+    .replace(/^[*_`~#>\s-]+/, "")
+    .trimStart();
+
+  return normalized.startsWith(AI_COMMENT_PREFIX);
 }
 
 function mapPullRequest(pullRequest: PullRequestResponse) {
@@ -1246,7 +1283,13 @@ function readConfigFromValues(values: Record<string, string | undefined>): Serve
 }
 
 function readConfig(): ServerConfig {
-  return readConfigFromValues(process.env);
+  const pluginRoot = resolvePluginRoot();
+  const processEnv = normalizeStringRecord(
+    Object.fromEntries(Object.entries(process.env).filter(([key]) => key.startsWith("ADO_"))),
+  );
+  const workspaceEnv = readWorkspaceServerEnvSync(pluginRoot);
+  const userEnv = readUserServerEnvSync(pluginRoot);
+  return readConfigFromValues(mergeStringRecords(userEnv, workspaceEnv, processEnv));
 }
 
 function ensureProject(project: string | undefined, config: ServerConfig): string {
@@ -1310,6 +1353,31 @@ async function adoRequest<T>(
 
 const execFileAsync = promisify(execFile);
 
+async function execPowerShellEncodedScript(encodedScript: string, env: NodeJS.ProcessEnv) {
+  const shells = process.platform === "win32" ? ["pwsh", "powershell.exe"] : ["pwsh"];
+  let lastError: unknown;
+
+  for (const shell of shells) {
+    try {
+      const result = await execFileAsync(shell, ["-NoProfile", "-NonInteractive", "-EncodedCommand", encodedScript], {
+        env,
+        maxBuffer: 10 * 1024 * 1024,
+      });
+      return {
+        shell,
+        ...result,
+      };
+    } catch (error) {
+      lastError = error;
+      if ((error as NodeJS.ErrnoException).code !== "ENOENT") {
+        throw error;
+      }
+    }
+  }
+
+  throw lastError ?? new Error("Kunde inte starta PowerShell.");
+}
+
 async function powershellAdoRequest<T>(
   config: ServerConfig,
   path: string,
@@ -1319,7 +1387,6 @@ async function powershellAdoRequest<T>(
   const url = buildUrl(config, path, query).toString();
   const method = init?.method ?? "GET";
   const body = typeof init?.body === "string" ? init.body : "";
-
   const script = `
 $ErrorActionPreference = 'Stop'
 $ProgressPreference = 'SilentlyContinue'
@@ -1329,8 +1396,10 @@ $params = @{
   Uri = $env:REQUEST_URL
   Method = $env:REQUEST_METHOD
   UseDefaultCredentials = $true
-  AllowUnencryptedAuthentication = $true
   Headers = $headers
+}
+if ($PSVersionTable.PSVersion.Major -ge 6) {
+  $params['AllowUnencryptedAuthentication'] = $true
 }
 if ($env:REQUEST_BODY) {
   $params['ContentType'] = 'application/json'
@@ -1343,17 +1412,12 @@ if ($null -eq $response) {
   [Console]::Out.Write(($response | ConvertTo-Json -Depth 100 -Compress))
 }
 `;
-
   const encodedScript = Buffer.from(script, "utf16le").toString("base64");
-  const shell = process.platform === "win32" ? "pwsh" : "pwsh";
-  const { stdout, stderr } = await execFileAsync(shell, ["-NoProfile", "-EncodedCommand", encodedScript], {
-    env: {
-      ...process.env,
-      REQUEST_URL: url,
-      REQUEST_METHOD: method,
-      REQUEST_BODY: body,
-    },
-    maxBuffer: 10 * 1024 * 1024,
+  const { stdout, stderr } = await execPowerShellEncodedScript(encodedScript, {
+    ...process.env,
+    REQUEST_URL: url,
+    REQUEST_METHOD: method,
+    REQUEST_BODY: body,
   });
 
   if (stderr?.trim()) {
@@ -1557,6 +1621,55 @@ async function listPullRequestThreads(config: ServerConfig, project: string, rep
   return normalizeCollection(response);
 }
 
+async function getWorkItemComment(config: ServerConfig, project: string, workItemId: number, commentId: number) {
+  return adoRequest<CommentResponse>(
+    config,
+    `/${encodePathSegment(project)}/_apis/wit/workItems/${workItemId}/comments/${commentId}`,
+    undefined,
+    {
+      "api-version": config.commentsApiVersion,
+    },
+  );
+}
+
+async function assertPullRequestCommentIsAiGenerated(
+  config: ServerConfig,
+  project: string,
+  repository: string,
+  pullRequestId: number,
+  threadId: number,
+  commentId: number,
+) {
+  const threads = await listPullRequestThreads(config, project, repository, pullRequestId);
+  const thread = threads.find((entry) => entry.id === threadId);
+  const comment = thread?.comments?.find((entry) => entry.id === commentId);
+
+  if (!thread || !comment || thread.isDeleted || comment.isDeleted) {
+    throw new Error("Kunde inte hitta kommentaren som skulle uppdateras.");
+  }
+
+  if (!commentStartsWithAiGeneratedPrefix(comment.content)) {
+    throw new Error("Bara AI-genererade kommentarer som börjar med 'AI-genererad kommentar:' får uppdateras.");
+  }
+}
+
+async function assertWorkItemCommentIsAiGenerated(
+  config: ServerConfig,
+  project: string,
+  workItemId: number,
+  commentId: number,
+) {
+  const comment = await getWorkItemComment(config, project, workItemId, commentId);
+
+  if (comment.isDeleted) {
+    throw new Error("Kunde inte hitta kommentaren som skulle uppdateras.");
+  }
+
+  if (!commentStartsWithAiGeneratedPrefix(comment.text)) {
+    throw new Error("Bara AI-genererade kommentarer som börjar med 'AI-genererad kommentar:' får uppdateras.");
+  }
+}
+
 async function addPullRequestComment(
   config: ServerConfig,
   project: string,
@@ -1574,7 +1687,7 @@ async function addPullRequestComment(
         comments: [
           {
             parentCommentId: 0,
-            content: formatAiGeneratedComment(title, text),
+            content: formatAiGeneratedPullRequestComment(title, text),
             commentType: 1,
           },
         ],
@@ -1600,7 +1713,7 @@ async function updatePullRequestComment(
     {
       method: "PATCH",
       body: JSON.stringify({
-        content: formatAiGeneratedComment(title, text),
+        content: formatAiGeneratedPullRequestComment(title, text),
       }),
     },
   );
@@ -1675,6 +1788,17 @@ function resolvePluginRoot() {
   return baseDirName === "src" || baseDirName === "dist" ? path.dirname(currentDir) : currentDir;
 }
 
+function includesKnownPluginMarker(value: string) {
+  const normalized = value.toLowerCase();
+  return [
+    "azure-devops-onprem-mcp",
+    "exor-devops-onprem-mcp",
+    "devops-onprem-mcp",
+    "azure-devops-onprem",
+    "ado-onprem",
+  ].some((marker) => normalized.includes(marker));
+}
+
 function normalizePathForComparison(value: string) {
   return path.resolve(value).replace(/\//g, "\\").toLowerCase();
 }
@@ -1709,12 +1833,121 @@ function serverEntryMatchesPlugin(entry: LocalConfigServerEntry, pluginRoot: str
   const values = [entry.command, ...(entry.args ?? [])].filter((value): value is string => typeof value === "string");
   return values.some((value) => {
     const normalizedValue = value.replace(/^["']|["']$/g, "");
+    if (includesKnownPluginMarker(normalizedValue)) {
+      return true;
+    }
+
     if (!path.isAbsolute(normalizedValue)) {
-      return normalizedValue.toLowerCase().includes("azure-devops-onprem-mcp");
+      return false;
     }
 
     return normalizePathForComparison(normalizedValue).includes(normalizedPluginRoot);
   });
+}
+
+function readJsonFileSync<T>(filePath: string) {
+  const content = readFileSync(filePath, "utf8");
+  return JSON.parse(content) as T;
+}
+
+function getMatchingServerEntry(config: LocalConfigFile, pluginRoot: string) {
+  const entries = getServerEntries(config);
+  return (
+    entries.find(({ serverName }) => serverName === SERVER_NAME) ??
+    entries.find(({ entry }) => serverEntryMatchesPlugin(entry, pluginRoot)) ??
+    entries.find(({ serverName, entry }) => {
+      const values = [serverName, entry.command, ...(entry.args ?? [])]
+        .filter((value): value is string => typeof value === "string")
+        .join(" ")
+        .toLowerCase();
+      const env = entry.env ?? {};
+      return (typeof env.ADO_BASE_URL === "string" || typeof env.ADO_DEFAULT_PROJECT === "string") && includesKnownPluginMarker(values);
+    })
+  );
+}
+
+function normalizeNonEmptyStringRecord(values: Record<string, string | undefined>) {
+  return Object.fromEntries(
+    Object.entries(values).filter(([, value]) => typeof value === "string" && value.trim().length > 0),
+  ) as Record<string, string>;
+}
+
+function mergeStringRecords(...records: Array<Record<string, string> | undefined>) {
+  return records.reduce<Record<string, string>>((accumulator, record) => {
+    if (!record) {
+      return accumulator;
+    }
+
+    return {
+      ...accumulator,
+      ...normalizeNonEmptyStringRecord(record),
+    };
+  }, {});
+}
+
+function getWorkspaceConfigCandidatesSync(startDir: string) {
+  const candidates: string[] = [];
+  let currentDir = path.resolve(startDir);
+
+  while (true) {
+    candidates.push(path.join(currentDir, ".mcp.json"));
+    candidates.push(path.join(currentDir, "mcp-config.json"));
+
+    const parentDir = path.dirname(currentDir);
+    if (parentDir === currentDir) {
+      break;
+    }
+
+    currentDir = parentDir;
+  }
+
+  return candidates;
+}
+
+function readWorkspaceServerEnvSync(pluginRoot: string) {
+  const candidateRoots = [process.env.ADO_WORKSPACE_REPO_ROOT, process.env.INIT_CWD, process.cwd()].filter(
+    (value): value is string => typeof value === "string" && value.trim().length > 0,
+  );
+
+  for (const root of candidateRoots) {
+    for (const filePath of getWorkspaceConfigCandidatesSync(root)) {
+      if (!existsSync(filePath)) {
+        continue;
+      }
+
+      try {
+        const config = readJsonFileSync<LocalConfigFile>(filePath);
+        const matchingEntry = getMatchingServerEntry(config, pluginRoot);
+        if (matchingEntry?.entry.env) {
+          return normalizeStringRecord(matchingEntry.entry.env);
+        }
+      } catch (error) {
+        console.error(`Kunde inte läsa workspace-konfig ${filePath}: ${truncate(String(error))}`);
+      }
+    }
+  }
+
+  return undefined;
+}
+
+function readUserServerEnvSync(pluginRoot: string) {
+  for (const filePath of getUserConfigCandidates()) {
+    if (!existsSync(filePath)) {
+      continue;
+    }
+
+    try {
+      const config = readJsonFileSync<LocalConfigFile>(filePath);
+      const matchingEntry = getMatchingServerEntry(config, pluginRoot);
+      if (matchingEntry?.entry.env) {
+        return normalizeStringRecord(matchingEntry.entry.env);
+      }
+    } catch (error) {
+      console.error(`Kunde inte läsa lokal MCP-konfig ${filePath}: ${truncate(String(error))}`);
+    }
+  }
+
+  return undefined;
 }
 
 async function readJsonFile<T>(filePath: string) {
@@ -1789,14 +2022,7 @@ function buildSetupServerEnv(options: SetupCommandOptions) {
     env.ADO_DEFAULT_PROJECT = options.defaultProject;
   }
 
-  if (options.authHeader) {
-    env.ADO_AUTH_HEADER = options.authHeader;
-  } else if (options.pat) {
-    env.ADO_PAT = options.pat;
-  } else if (options.basicUsername) {
-    env.ADO_BASIC_USERNAME = options.basicUsername;
-    env.ADO_BASIC_PASSWORD = options.basicPassword ?? "";
-  } else if (options.useDefaultCredentials) {
+  if (options.useDefaultCredentials) {
     env.ADO_USE_DEFAULT_CREDENTIALS = "true";
   }
 
@@ -1834,6 +2060,8 @@ function getManagedAgentGuideText(serverName: string) {
     "## Azure DevOps Onprem MCP",
     "",
     `Det finns en repo-lokal MCP-server i \`.mcp.json\` med servernamnet \`${serverName}\`.`,
+    "",
+    "Om `/devops`-skillen finns tillgänglig ska du använda den för Azure DevOps-uppgifter.",
     "",
     "När du behöver läsa eller kommentera work items, buggar, pull requests, repositories eller builds i Azure DevOps ska du i första hand använda den konfigurerade MCP-servern i stället för rå PowerShell eller direkta REST-anrop.",
     "",
@@ -2228,8 +2456,11 @@ async function runSetupCommand(parsedArgs: Map<string, string>) {
       : options.writeUserConfig
         ? "Klientkonfig: inga kända agentmappar hittades under hemkatalogen."
         : "Klientkonfig: hoppades över. Använd exempel-filen om du vill lägga till lokal auto-review-config.",
+    options.authHeader || options.pat || options.basicUsername
+      ? "Obs: autentiseringshemligheter skrevs inte till repoets .mcp.json. Lägg dem i användarens miljövariabler eller lokal klientkonfig vid behov."
+      : undefined,
   ];
-  console.log(lines.join("\n"));
+  console.log(lines.filter((line): line is string => typeof line === "string").join("\n"));
 }
 
 function normalizeRemoteIdentity(value: string | undefined) {
@@ -2947,6 +3178,7 @@ async function main() {
         }
 
         const resolvedProject = ensureProject(asString(args.project), config);
+        await assertPullRequestCommentIsAiGenerated(config, resolvedProject, repository, pullRequestId, threadId, commentId);
         const response = await updatePullRequestComment(
           config,
           resolvedProject,
@@ -3362,7 +3594,7 @@ async function main() {
           {
             method: "POST",
             body: JSON.stringify({
-              text: formatAiGeneratedComment(title, text),
+              text: formatAiGeneratedWorkItemComment(title, text),
             }),
           },
           {
@@ -3395,13 +3627,14 @@ async function main() {
           throw new Error("title och text är obligatoriska.");
         }
 
+        await assertWorkItemCommentIsAiGenerated(config, resolvedProject, workItemId, commentId);
         const response = await adoRequest<CommentResponse>(
           config,
           `/${encodePathSegment(resolvedProject)}/_apis/wit/workItems/${workItemId}/comments/${commentId}`,
           {
             method: "PATCH",
             body: JSON.stringify({
-              text: formatAiGeneratedComment(title, text),
+              text: formatAiGeneratedWorkItemComment(title, text),
             }),
           },
           {

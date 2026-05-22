@@ -1,0 +1,46 @@
+{
+  "name": "azure-devops-onprem",
+  "description": "Azure DevOps Server / TFS on-prem skill bundle for Copilot CLI",
+  "version": "0.1.0",
+  "author": {
+    "name": "Exor"
+  },
+  "homepage": "https://github.com/LudvigExor/Exor-devops-onprem-mcp",
+  "repository": "https://github.com/LudvigExor/Exor-devops-onprem-mcp",
+  "keywords": [
+    "azure-devops",
+    "tfs",
+    "on-prem",
+    "copilot-cli"
+  ],
+  "category": "devops",
+  "tags": [
+    "azure-devops-server",
+    "pull-request-review",
+    "work-items"
+  ],
+  "skills": "skills/",
+  "mcpServers": {
+    "azure-devops-onprem": {
+      "type": "stdio",
+      "command": "node",
+      "args": [
+        "dist/index.js"
+      ],
+      "env": {
+        "ADO_BASE_URL": "${ADO_BASE_URL:-}",
+        "ADO_DEFAULT_PROJECT": "${ADO_DEFAULT_PROJECT:-}",
+        "ADO_API_VERSION": "${ADO_API_VERSION:-5.1}",
+        "ADO_COMMENTS_API_VERSION": "${ADO_COMMENTS_API_VERSION:-5.1-preview.3}",
+        "ADO_USE_DEFAULT_CREDENTIALS": "${ADO_USE_DEFAULT_CREDENTIALS:-true}",
+        "ADO_PAT": "${ADO_PAT:-}",
+        "ADO_BASIC_USERNAME": "${ADO_BASIC_USERNAME:-}",
+        "ADO_BASIC_PASSWORD": "${ADO_BASIC_PASSWORD:-}",
+        "ADO_AUTH_HEADER": "${ADO_AUTH_HEADER:-}"
+      },
+      "tools": [
+        "*"
+      ]
+    }
+  }
+}

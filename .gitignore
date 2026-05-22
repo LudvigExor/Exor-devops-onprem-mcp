@@ -1,2 +1,4 @@
-dist/
+dist/*
+!dist/
+!dist/index.js
 node_modules/

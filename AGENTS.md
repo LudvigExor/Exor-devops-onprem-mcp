@@ -1,15 +1,19 @@
 # AzureDevOpsOnPremMcp Agent Guide
 
-## Syfte
+Det här repo:t innehåller MCP-servern för TFS/Azure DevOps Server on-prem och en inbyggd `/devops`-skill.
 
-Den här mappen innehåller MCP-servern för TFS/Azure DevOps Server.
+För uppgifter som gäller work items, buggar, pull requests, commits, diffar, implementation plans och kodgranskning ska du i första hand använda `/devops` när skillen finns tillgänglig.
+
+Om skillen inte är tillgänglig ska du ändå följa samma regler nedan och föredra den konfigurerade Azure DevOps-MCP-servern framför rå PowerShell eller direkta REST-anrop.
+
+## Syfte
 
 Som agent ska du använda den här servern för:
 
 - läsning av work items, buggar, repositories, builds, pull requests, commits, diffar och kommentarer
-- skrivning av **endast work item-kommentarer och pull request-kommentarer**
+- skrivning av endast work item-kommentarer och pull request-kommentarer
 
-Du ska **inte** använda den för att ändra annan work item-data.
+Du ska inte använda den för att ändra annan work item-data eller pull request-status.
 
 ## Tillåtna skrivoperationer
 
@@ -18,9 +22,7 @@ Pluginen får bara skriva:
 - nya kommentarer på work items
 - uppdateringar av work item-kommentarer
 - nya kommentarer på pull requests
-- uppdateringar av tidigare AI-genererade pull request-kommentarer
-
-För pull requests gäller uttryckligen att pluginen bara får **posta kommentarer**.
+- uppdateringar av tidigare AI-genererade pull request-kommentarer när ett sådant flöde uttryckligen används
 
 Pluginen får inte användas för att ändra:
 
@@ -39,7 +41,7 @@ Pluginen får inte användas för att ändra:
 
 ## Konfiguration
 
-Utgå från att pluginen är generell och får sin projekt-/serverkonfiguration från miljövariabler eller MCP-konfiguration.
+Utgå från att pluginen är generell och får sin projekt- och serverkonfiguration från miljövariabler eller MCP-konfiguration.
 
 Viktiga värden är:
 
@@ -47,17 +49,15 @@ Viktiga värden är:
 - `ADO_DEFAULT_PROJECT`
 - `ADO_API_VERSION`
 - `ADO_COMMENTS_API_VERSION`
-- autentiseringsval via `ADO_USE_DEFAULT_CREDENTIALS`, `ADO_PAT`, `ADO_BASIC_USERNAME`/`ADO_BASIC_PASSWORD` eller `ADO_AUTH_HEADER`
+- autentisering via `ADO_USE_DEFAULT_CREDENTIALS`, `ADO_PAT`, `ADO_BASIC_USERNAME` och `ADO_BASIC_PASSWORD`, eller `ADO_AUTH_HEADER`
 
 ## Kommentarformat
 
 Alla kommentarer som skapas eller uppdateras via pluginen ska utgå från detta format:
 
-1. Första raden är alltid:
-   - `AI-genererad kommentar:`
+1. Första raden är alltid `AI-genererad kommentar:`
 2. Därefter en tom rad
-3. Därefter titel på ny rad, till exempel:
-   - `Implementation plan`
+3. Därefter titel på ny rad, till exempel `Implementation plan`
 4. Därefter själva innehållet
 
 Pluginen lägger in prefixet automatiskt. Som agent ska du därför fokusera på:
@@ -66,9 +66,14 @@ Pluginen lägger in prefixet automatiskt. Som agent ska du därför fokusera på
 - rätt innehåll
 - kortfattad men komplett struktur
 
+För rendering gäller:
+
+- work item-kommentarer formateras som HTML
+- pull request-kommentarer formateras som markdown
+
 ## Regler för implementation plans i buggar
 
-Om kommentaren gäller en **bugg** och du vet hur problemet kan återskapas ska kommentaren börja med:
+Om kommentaren gäller en bugg och du vet hur problemet kan återskapas ska kommentaren börja med:
 
 ### Så här återskapas problemet
 
@@ -121,8 +126,8 @@ Om både PR-länkar och commit-länkar finns får agenten använda båda som gra
 
 Kommentarer ska vara:
 
-- På samma språk som PR beskrivning eller work items beskrivning, beroende på vad kommentaren ska postas.
-kortfattade först
+- på samma språk som PR-beskrivningen eller work item-beskrivningen, beroende på var kommentaren ska postas
+- kortfattade först
 - korta och koncisa
 - konkreta och relevanta
 - lätta att skumma
@@ -142,9 +147,9 @@ Bra tumregel:
 
 ## Viktigt om renderingen i TFS
 
-TFS-kommentarer i den här miljön verkar inte rendera markdown eller HTML pålitligt i UI:t.
+I den här miljön verkar work item-kommentarer inte rendera markdown pålitligt, medan pull request-kommentarer stöder markdown bättre.
 
-Utgå därför från att kommentaren kan visas som relativt platt text och skriv så att innehållet ändå går att förstå utan snygg formatering.
+Utgå därför från att work item-kommentarer ska fungera även med enkel HTML, och att innehållet alltid ska vara begripligt även om formateringen blir enkel i UI:t.
 
 ## Exempel på bra titelrader
 

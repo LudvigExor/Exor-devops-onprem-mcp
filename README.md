@@ -35,6 +35,33 @@ npm install
 npm run build
 ```
 
+Om du använder **Copilot CLI** och vill ha den inbyggda `/devops`-skillen kan du installera pluginet via marketplace:
+
+```powershell
+copilot plugin marketplace add LudvigExor/Exor-devops-onprem-mcp
+copilot plugin install azure-devops-onprem@exor-devops-onprem
+```
+
+Det här steget krävs för `/devops`-skillen.
+
+När pluginet väl är installerat kan det uppdateras med:
+
+```powershell
+copilot plugin update azure-devops-onprem
+```
+
+För lokal utveckling eller test går det fortfarande att installera direkt från sökväg:
+
+```powershell
+copilot plugin install C:\path\to\Exor-devops-onprem-mcp
+```
+
+Direkt installation från lokal sökväg är främst för utveckling och test.
+
+### Enkelt att komma igång
+
+Plugininstallationen behövs för `/devops`-skillen. Själva Azure DevOps-verktygen använder du fortfarande enklast via repoets `.mcp.json` eller en user-level `mcp-config.json`.
+
 Vid uppdatering - i pluginets sökväg kör du:
 
 ```powershell
@@ -50,6 +77,7 @@ Det enklaste är oftast att:
 1. kopiera `examples\.mcp.json` till projektets root - måste heta `.mcp.json`
 2. ändra sökvägen i .mcp.json-filen till din mapp där pluginet lagrats
 3. ändra `ADO_BASE_URL` och eventuellt `ADO_DEFAULT_PROJECT` (till devops on prem URL och projectname i devops)
+4. lägg `.mcp.json` i projektets `.gitignore`
 
 Om du vill använda **(experimental)** automatisk PR-granskning kan du också kopiera:
 
@@ -84,6 +112,8 @@ Om du även vill att setup ska skriva lokal klientkonfig:
 ```powershell
 npm run setup:prod -- --repo-root C:\path\to\your-project --write-user-config true
 ```
+
+Setup skriver inte autentiseringshemligheter till repoets `.mcp.json`. Om du behöver PAT, basic auth eller eget auth-header ska det ligga i användarens lokala miljö eller klientkonfig, inte i projektets repo.
 
 ## Personlig klientkonfig
 
@@ -120,6 +150,8 @@ Vanligt minimum är:
 ## Kodgranskning i PR
 
 Du kan be agenten kodgranska en PR och posta resultatet i PR:n.
+
+Om du använder Copilot CLI och har installerat pluginet är det ofta effektivare att börja prompten med `/devops`, till exempel `/devops kodgranska min senaste PR`. Det fungerar även utan `/devops`, men skillen gör det tydligare att rätt DevOps-flöde och plugin ska användas.
 
 Exempel:
 
